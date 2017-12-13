@@ -57,7 +57,17 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 			wg.Add(1)
 			ok := call(v, "Worker.DoTask", &tArgs, nil)
 			if ok != true {
-				fmt.Printf("Error when remote call worker %v", v)
+				for {
+					otherWorker := <-registerChan
+					ok := call(otherWorker, "Worker.DoTask", &tArgs, nil)
+					if ok != true {
+						continue
+					} else {
+						wg.Done()
+						registerChan <- otherWorker
+						return
+					}
+				}
 			}
 			wg.Done()
 			registerChan <- v
