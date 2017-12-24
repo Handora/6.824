@@ -23,7 +23,12 @@ import "labrpc"
 // import "bytes"
 // import "encoding/gob"
 
-
+//
+// some const value for implementation
+//
+const (
+	DEFAULT_SLICE_LENGTH = 100
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -38,6 +43,14 @@ type ApplyMsg struct {
 }
 
 //
+// A log entry implementation
+//
+type logEntry struct {
+	term    int
+	command interface{}
+}
+
+//
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
@@ -49,8 +62,25 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	currentTerm int
+	state       int
+	votedFor    *labrpc.ClientEnd
+	log         []logEntry
+	commitIndex int
+	lastApplied int
 
+	nextIndex  []int
+	matchIndex []int
 }
+
+//
+// Raft's server state
+//
+const (
+	FOLLOWER = iota
+	LEADER
+	CANDIDATE
+)
 
 // return currentTerm and whether this server
 // believes it is the leader.
@@ -59,6 +89,9 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	term = rf.currentTerm
+	isleader = (rf.state == LEADER)
+
 	return term, isleader
 }
 
@@ -93,15 +126,18 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+
+	// as specialed by paper Figure 2
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -110,6 +146,18 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+
+	// as specialed by paper Figure 2
+	Term        int
+	VoteGranted bool
+}
+
+//
+// Election restriction implementation
+// paper 5.4.1
+//
+func (rf *Raft) electionRestriction(args *RequestVoteArgs) bool {
+	return true
 }
 
 //
@@ -117,6 +165,36 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
+	// TODO:
+	// 		make more clean code
+	// we should enhance once we found we are outdated
+	rf.mu.Lock()
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+	}
+	rf.mu.Unlock()
+
+	// refuse outdated request
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
+	}
+
+	rf.mu.Lock()
+	if (rf.votedFor == nil || rf.votedFor == rf.peers[args.CandidateId]) && rf.electionRestriction(args) {
+		rf.votedFor = rf.peers[args.CandidateId]
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		rf.mu.Unlock()
+		return
+	}
+	rf.mu.Unlock()
+
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+	return
 }
 
 //
@@ -153,6 +231,44 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+//
+// Invoked by leader to replicate log entries, also used as heartbeat
+//
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	// Entries []
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// TODO
+	//   clean code
+
+	// we should enhance once we found we are outdated
+	rf.mu.Lock()
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+	}
+	rf.mu.Unlock()
+
+	// refuse outdated request
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
+	// return false if log doesn't matches PrevLogTerm and PrevLogIndex
+
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -173,7 +289,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -207,10 +322,23 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.currentTerm = 0
+	rf.mu = sync.Mutex{}
+	rf.votedFor = nil
+	rf.state = FOLLOWER
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+
+	// ensure the first index is 1
+	rf.log = make([]logEntry, 1, DEFAULT_SLICE_LENGTH)
+
+	//
+	go func() {
+
+	}()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 
 	return rf
 }
