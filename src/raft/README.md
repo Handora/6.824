@@ -1,19 +1,18 @@
-# raft implementation tips
+# some awesome way to enhance the performance
+# this is awesome
+if follower rejects, includes this in reply:
+    the follower's term in the conflicting entry
+    the index of follower's first entry with that term
+  if leader knows about the conflicting term:
+    move nextIndex[i] back to leader's last entry for the conflicting term
+  else:
+    move nextIndex[i] back to follower's first index
 
-- heartbeats RPCs should also ensure the consensus of raft
-- four errors: livelocks, incorrect or incomplete RPC handlers, failure to follow The Rules, and term confusion.
-
-
-# unread questions
-> What exactly do the C_old and C_new variables in section 6 (and figure
-> 11) represent? Are they the leader in each configuration?
-
-They are the set of servers in the old/new configuration.
-
-
-# Not truly understood things
-Another issue many had (often immediately after fixing the issue above), was that, upon receiving a heartbeat, they would truncate the follower’s log following prevLogIndex, and then append any entries included in the AppendEntries arguments. This is also not correct. We can once again turn to Figure 2:
-
-` If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it. `
-
-The if here is crucial. If the follower has all the entries the leader sent, the follower MUST NOT truncate its log. Any elements following the entries sent by the leader MUST be kept. This is because we could be receiving an outdated AppendEntries RPC from the leader, and truncating the log would mean “taking back” entries that we may have already told the leader that we have in our log.
+# lab3
+reject if term is old (not the current leader)
+  reject (ignore) if follower already has last included index/term
+    it's an old/delayed RPC
+  follower empties its log, replaces with fake "prev" entry
+  set lastApplied to lastIncludedIndex
+  send snapshot in applyCh to service
+  service replaces its k/v table with snapshot contents
