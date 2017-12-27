@@ -431,3 +431,11 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	return -1
 }
+
+// personal leader check
+func (cfg *config) dump() {
+	for i:=0; i<len(cfg.rafts); i++ {
+		term, lead := cfg.rafts[i].GetState()
+		DPrintf("%d(%d) is %v lead", i, term, lead)
+	}
+}

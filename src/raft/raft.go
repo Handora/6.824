@@ -33,7 +33,7 @@ import (
 const (
 	DefaultSliceLength = 100
 	DefaultTermBottom  = 300
-	DefaultTermTop     = 450
+	DefaultTermTop     = 400
 )
 
 //
@@ -64,7 +64,6 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
-	sh        chan int
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -76,6 +75,7 @@ type Raft struct {
 	commitIndex int
 	lastApplied int
 	votes       int
+	sh          chan int
 
 	// volatile state on leaders
 	nextIndex  []int
@@ -86,9 +86,9 @@ type Raft struct {
 // Raft's server state
 //
 const (
-	FOLLOWER = iota
-	LEADER
-	CANDIDATE
+	FOLLOWER = 0
+	LEADER = 1
+	CANDIDATE = 2
 )
 
 // return currentTerm and whether this server
@@ -161,7 +161,7 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-//
+// TODO:
 // Election restriction implementation
 // paper 5.4.1
 //
@@ -177,20 +177,10 @@ func (rf *Raft) electionRestriction(args *RequestVoteArgs) bool {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	DPrintf("node %d(term: %d) receive request votes from %d(%d)", rf.me, rf.currentTerm, args.CandidateId, args.Term)
+	// DPrintf("node %d(term: %d) receive request votes from %d(%d)", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 	// TODO:
 	// 		make more clean code
-	// we should enhance once we found we are outdated
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.state = FOLLOWER
-		rf.votedFor = nil
-		rf.votes = 0
-	}
 
 	// refuse outdated request
 	if args.Term < rf.currentTerm {
@@ -198,6 +188,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		return
 	}
+
+	// we should enhance once we found we are outdated
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = FOLLOWER
+		rf.votedFor = nil
+	}
+	rf.sh <- 1
 
 	if rf.votedFor == nil || rf.votedFor == rf.peers[args.CandidateId] {
 		rf.votedFor = rf.peers[args.CandidateId]
@@ -253,8 +251,7 @@ type AppendEntriesArgs struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      [10]LogEntry
-	Nentries     int
+	Entries      []LogEntry
 	LeaderCommit int
 }
 
@@ -267,16 +264,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// TODO
 	//   clean code
 
-	// we should enhance once we found we are outdated
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	DPrintf("node %d(%d) receive append entry from leader %d(%d)\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.votedFor = nil
-		rf.state = FOLLOWER
-		rf.votes = 0
-	}
+	// DPrintf("node %d(%d) receive append entry from leader %d(%d)\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
 
 	// refuse outdated request
 	if args.Term < rf.currentTerm {
@@ -284,6 +272,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
+
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = nil
+		rf.state = FOLLOWER
+		rf.votes = 0
+	}
+	rf.sh <- 1
 
 	// return false if log doesn't matches PrevLogTerm and PrevLogIndex
 	if len(rf.log) > args.PrevLogIndex && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
@@ -295,15 +292,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// if an existing entry conflicts with a new one, delete the existing entry and all those follow it
 	// according to paper 5.3
 	var i int
-	for i = 0; i < args.Nentries; i++ {
+	for i = 0; i < len(args.Entries); i++ {
 		if rf.log[args.PrevLogIndex+i+1].Term != args.Entries[i].Term {
 			break
 		}
 	}
-	if i != args.Nentries {
+	if i != len(args.Entries) {
 		rf.log = rf.log[:args.PrevLogTerm+i+1]
 	}
-	for ; i < args.Nentries ; i++ {
+	for ; i < len(args.Entries) ; i++ {
 		rf.log = append(rf.log, args.Entries[i])
 	}
 
@@ -318,7 +315,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
-	rf.sh <- 1
 }
 
 // send Append entries RPC
@@ -382,6 +378,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.mu = sync.Mutex{}
 	rf.votedFor = nil
+	rf.votes = 0
 	rf.state = FOLLOWER
 	rf.commitIndex = 0
 	rf.lastApplied = 0
@@ -418,17 +415,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func (rf *Raft) doFollower() {
-	ch := make(chan int)
-
-	go func() {
-		rd := rand.Intn(DefaultTermTop-DefaultTermBottom) + DefaultTermBottom
-		time.Sleep(time.Duration(rd) * time.Millisecond)
-
-		ch <- 1
-	}()
-
 	select {
-	case <-ch:
+	case <-time.After(time.Duration(rand.Intn(DefaultTermTop-DefaultTermBottom)+DefaultTermBottom)*time.Millisecond):
 		rf.state = CANDIDATE
 		return
 	case <-rf.sh:
@@ -443,51 +431,53 @@ func (rf *Raft) doLeader() {
 	}
 
 	// send heartbeat or heartbeat to all peers
-	for i := 0; i < len(rf.peers); i++ {
-		i := i
-		go func() {
-			// TODO:
-			//    now only support heartbeat, it's likely to combine heartbeat and AppendEntries together
-			for rf.state == LEADER {
-				var entries [10]LogEntry
-				var nentries int
-				if rf.nextIndex[i] < len(rf.log) {
-					nentries = min(10, len(rf.log)-rf.nextIndex[i])
-				} else {
-					nentries = 0
-				}
-				args := &AppendEntriesArgs{rf.currentTerm, rf.me, rf.nextIndex[i] - 1,
-				rf.log[rf.nextIndex[i]-1].Term, entries, nentries, rf.commitIndex}
-				for j:=0; j<nentries; j++ {
-					args.Entries[j] = rf.log[rf.nextIndex[i]+j]
-				}
 
-				reply := &AppendEntriesReply{}
-
-				ok := rf.sendAppendEntries(i, args, reply)
-				if ok {
-					if !reply.Success {
-						if reply.Term > rf.currentTerm {
-							rf.mu.Lock()
-							rf.currentTerm = reply.Term
-							rf.state = FOLLOWER
-							rf.mu.Unlock()
-							return
+	go func() {
+		for {
+			for i := 0; i < len(rf.peers); i++ {
+				if i == rf.me {
+					continue
+				}
+				i := i
+				go func() {
+					// TODO:
+					//    now only support heartbeat, it's likely to combine heartbeat and AppendEntries together
+					for rf.state == LEADER {
+						var entries []LogEntry
+						if rf.nextIndex[i] < len(rf.log) {
+							entries = rf.log[rf.nextIndex[i]:]
 						} else {
-							rf.mu.Lock()
-							rf.nextIndex[i]--
-							rf.mu.Unlock()
+							entries = make([]LogEntry, 0)
 						}
-					} else {
-						rf.mu.Lock()
-						rf.nextIndex[i] = rf.nextIndex[i] + nentries
-						rf.mu.Unlock()
+						args := &AppendEntriesArgs{rf.currentTerm, rf.me, rf.nextIndex[i] - 1,
+							rf.log[rf.nextIndex[i]-1].Term, entries, rf.commitIndex}
+
+						reply := &AppendEntriesReply{}
+
+						ok := rf.sendAppendEntries(i, args, reply)
+						if ok {
+							if !reply.Success {
+								if reply.Term > rf.currentTerm {
+									rf.currentTerm = reply.Term
+									rf.state = FOLLOWER
+									rf.sh <- 1
+									rf.votedFor = nil
+									return
+								} else {
+									rf.nextIndex[i]--
+								}
+							} else {
+								rf.nextIndex[i] = rf.nextIndex[i] + len(args.Entries)
+							}
+						}
 					}
-				}
-				time.Sleep(100 * time.Millisecond)
+				}()
 			}
-		}()
-	}
+			time.Sleep(150*time.Millisecond)
+		}
+	}()
+
+
 
 	select {
 	case <-rf.sh:
@@ -495,45 +485,43 @@ func (rf *Raft) doLeader() {
 	}
 }
 
-
 // STATE: Candidate
 func (rf *Raft) doCandidate() {
-	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.peers[rf.me]
 	rf.votes = 1
-	rf.mu.Unlock()
-
-	ch := make(chan int)
-	go func() {
-		rd := rand.Intn(DefaultTermTop-DefaultTermBottom) + DefaultTermBottom
-		time.Sleep(time.Duration(rd) * time.Millisecond)
-
-		ch <- 1
-	}()
 
 	for i := 0; i < len(rf.peers); i++ {
+
 		i := i
+		if i == rf.me {
+			continue
+		}
 		go func() {
 			args := &RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log) - 1, rf.log[len(rf.log)-1].Term}
 			reply := &RequestVoteReply{}
+
 			ok := rf.sendRequestVote(i, args, reply)
 			if ok {
 				if reply.Term > rf.currentTerm {
-					rf.mu.Lock()
 					rf.currentTerm = reply.Term
 					rf.state = FOLLOWER
-					rf.mu.Unlock()
+					rf.votedFor = nil
+					rf.sh <- 1
+					return
+				} else if reply.Term < rf.currentTerm {
 					return
 				}
 
-				if reply.VoteGranted {
-					rf.mu.Lock()
+				if reply.VoteGranted && rf.state == CANDIDATE {
+					// DPrintf("ok for %d to %d\n", i, rf.me)
 					rf.votes++
 					if rf.votes >= len(rf.peers)/2+1 {
+						DPrintf("%d(%d) becomes leader", rf.me, rf.currentTerm)
 						rf.state = LEADER
+						rf.sh <- 1
 					}
-					rf.mu.Unlock()
+
 					return
 				}
 			}
@@ -541,7 +529,7 @@ func (rf *Raft) doCandidate() {
 	}
 
 	select {
-	case <-ch:
+	case <-time.After(time.Duration(rand.Intn(DefaultTermTop-DefaultTermBottom)+DefaultTermBottom)*time.Millisecond):
 		return
 	case <-rf.sh:
 		return
