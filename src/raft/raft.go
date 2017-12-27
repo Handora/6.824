@@ -7,7 +7,7 @@ package raft
 //
 // rf = Make(...)
 //   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
+// rf.Start(command interface{}) (index, term, isLeader)
 //   start agreement on a new log entry
 // rf.GetState() (term, isLeader)
 //   ask a Raft for its current term, and whether it thinks it is leader
@@ -31,9 +31,9 @@ import (
 // some const value for implementation
 //
 const (
-	DEFAULT_SLICE_LENGTH = 100
-	DEFAULT_TERM_BOTTOM  = 300
-	DEFAULT_TERM_TOP     = 450
+	DefaultSliceLength = 100
+	DefaultTermBottom  = 300
+	DefaultTermTop     = 450
 )
 
 //
@@ -51,9 +51,9 @@ type ApplyMsg struct {
 //
 // A log entry implementation
 //
-type logEntry struct {
-	term    int
-	command interface{}
+type LogEntry struct {
+	Term    int
+	Command string
 }
 
 //
@@ -72,7 +72,7 @@ type Raft struct {
 	currentTerm int
 	state       int
 	votedFor    *labrpc.ClientEnd
-	log         []logEntry
+	log         []LogEntry
 	commitIndex int
 	lastApplied int
 	votes       int
@@ -96,12 +96,12 @@ const (
 func (rf *Raft) GetState() (int, bool) {
 
 	var term int
-	var isleader bool
+	var isLeader bool
 	// Your code here (2A).
 	term = rf.currentTerm
-	isleader = (rf.state == LEADER)
+	isLeader = rf.state == LEADER
 
-	return term, isleader
+	return term, isLeader
 }
 
 //
@@ -142,7 +142,7 @@ func (rf *Raft) readPersist(data []byte) {
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 
-	// as specialed by paper Figure 2
+	// as specialized by paper Figure 2
 	Term         int
 	CandidateId  int
 	LastLogIndex int
@@ -156,7 +156,7 @@ type RequestVoteArgs struct {
 type RequestVoteReply struct {
 	// Your data here (2A).
 
-	// as specialed by paper Figure 2
+	// as specialized by paper Figure 2
 	Term        int
 	VoteGranted bool
 }
@@ -177,7 +177,7 @@ func (rf *Raft) electionRestriction(args *RequestVoteArgs) bool {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-
+	DPrintf("node %d(term: %d) receive request votes from %d(%d)", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 	// TODO:
 	// 		make more clean code
 	// we should enhance once we found we are outdated
@@ -189,6 +189,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.state = FOLLOWER
 		rf.votedFor = nil
+		rf.votes = 0
 	}
 
 	// refuse outdated request
@@ -198,10 +199,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	if (rf.votedFor == nil || rf.votedFor == rf.peers[args.CandidateId]) && rf.electionRestriction(args) {
+	if rf.votedFor == nil || rf.votedFor == rf.peers[args.CandidateId] {
 		rf.votedFor = rf.peers[args.CandidateId]
 		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
+		reply.VoteGranted = true
 		return
 	}
 
@@ -252,7 +253,8 @@ type AppendEntriesArgs struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []logEntry
+	Entries      [10]LogEntry
+	Nentries     int
 	LeaderCommit int
 }
 
@@ -268,10 +270,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// we should enhance once we found we are outdated
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	DPrintf("node %d(%d) receive append entry from leader %d(%d)\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = nil
 		rf.state = FOLLOWER
+		rf.votes = 0
 	}
 
 	// refuse outdated request
@@ -282,24 +286,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// return false if log doesn't matches PrevLogTerm and PrevLogIndex
-	if len(rf.log) < args.PrevLogIndex && rf.log[args.PrevLogIndex].term != args.PrevLogTerm {
+	if len(rf.log) > args.PrevLogIndex && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 
-	// if an existing entry conflicts with a new one, delete the existing entry and all that follow it
+	// if an existing entry conflicts with a new one, delete the existing entry and all those follow it
 	// according to paper 5.3
 	var i int
-	for i = 0; i < len(args.Entries); i++ {
-		if rf.log[args.PrevLogIndex+i+1].term != args.Entries[i].term {
+	for i = 0; i < args.Nentries; i++ {
+		if rf.log[args.PrevLogIndex+i+1].Term != args.Entries[i].Term {
 			break
 		}
 	}
-	if i != len(args.Entries) {
-		rf.log = rf.log[:args.PrevLogTerm+i]
+	if i != args.Nentries {
+		rf.log = rf.log[:args.PrevLogTerm+i+1]
 	}
-	for ; i < len(args.Entries); i++ {
+	for ; i < args.Nentries ; i++ {
 		rf.log = append(rf.log, args.Entries[i])
 	}
 
@@ -312,6 +316,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
+	reply.Success = true
+	reply.Term = rf.currentTerm
 	rf.sh <- 1
 }
 
@@ -384,24 +390,23 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rand.Seed(time.Now().UnixNano() + int64(me))
 
 	// ensure the first index is 1
-	rf.log = make([]logEntry, 1, DEFAULT_SLICE_LENGTH)
+	rf.log = make([]LogEntry, 1, DefaultSliceLength)
 
-	rf.sh = make(chan int)
+	rf.sh = make(chan int, 10)
 
 	srv := labrpc.MakeService(rf)
 	rpcs := labrpc.MakeServer()
 	rpcs.AddService(srv)
 
-	//
 	go func() {
 		for {
 			switch rf.state {
 			case FOLLOWER:
-				rf.do_follower()
+				rf.doFollower()
 			case LEADER:
-				rf.do_leader()
+				rf.doLeader()
 			case CANDIDATE:
-				rf.do_candidate()
+				rf.doCandidate()
 			}
 		}
 	}()
@@ -412,11 +417,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-func (rf *Raft) do_follower() {
+func (rf *Raft) doFollower() {
 	ch := make(chan int)
 
 	go func() {
-		rd := rand.Intn(DEFAULT_TERM_TOP-DEFAULT_TERM_BOTTOM) + DEFAULT_TERM_BOTTOM
+		rd := rand.Intn(DefaultTermTop-DefaultTermBottom) + DefaultTermBottom
 		time.Sleep(time.Duration(rd) * time.Millisecond)
 
 		ch <- 1
@@ -431,9 +436,9 @@ func (rf *Raft) do_follower() {
 	}
 }
 
-func (rf *Raft) do_leader() {
+func (rf *Raft) doLeader() {
 	for i := 0; i < len(rf.nextIndex); i++ {
-		rf.nextIndex[i] = len(rf.log) + 1
+		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = 0
 	}
 
@@ -444,9 +449,21 @@ func (rf *Raft) do_leader() {
 			// TODO:
 			//    now only support heartbeat, it's likely to combine heartbeat and AppendEntries together
 			for rf.state == LEADER {
-				args := &AppendEntriesArgs{rf.currentTerm, rf.me, rf.nextIndex[i] - 1, rf.log[rf.nextIndex[i]-1].term, rf.log[rf.nextIndex[i]:], rf.commitIndex}
+				var entries [10]LogEntry
+				var nentries int
+				if rf.nextIndex[i] < len(rf.log) {
+					nentries = min(10, len(rf.log)-rf.nextIndex[i])
+				} else {
+					nentries = 0
+				}
+				args := &AppendEntriesArgs{rf.currentTerm, rf.me, rf.nextIndex[i] - 1,
+				rf.log[rf.nextIndex[i]-1].Term, entries, nentries, rf.commitIndex}
+				for j:=0; j<nentries; j++ {
+					args.Entries[j] = rf.log[rf.nextIndex[i]+j]
+				}
+
 				reply := &AppendEntriesReply{}
-				time.Sleep(100 * time.Millisecond)
+
 				ok := rf.sendAppendEntries(i, args, reply)
 				if ok {
 					if !reply.Success {
@@ -463,10 +480,11 @@ func (rf *Raft) do_leader() {
 						}
 					} else {
 						rf.mu.Lock()
-						rf.nextIndex[i] = rf.nextIndex[i] + len(args.Entries)
+						rf.nextIndex[i] = rf.nextIndex[i] + nentries
 						rf.mu.Unlock()
 					}
 				}
+				time.Sleep(100 * time.Millisecond)
 			}
 		}()
 	}
@@ -477,16 +495,18 @@ func (rf *Raft) do_leader() {
 	}
 }
 
-func (rf *Raft) do_candidate() {
+
+// STATE: Candidate
+func (rf *Raft) doCandidate() {
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.peers[rf.me]
-	rf.votes = 0
+	rf.votes = 1
 	rf.mu.Unlock()
 
 	ch := make(chan int)
 	go func() {
-		rd := rand.Intn(DEFAULT_TERM_TOP-DEFAULT_TERM_BOTTOM) + DEFAULT_TERM_BOTTOM
+		rd := rand.Intn(DefaultTermTop-DefaultTermBottom) + DefaultTermBottom
 		time.Sleep(time.Duration(rd) * time.Millisecond)
 
 		ch <- 1
@@ -495,7 +515,7 @@ func (rf *Raft) do_candidate() {
 	for i := 0; i < len(rf.peers); i++ {
 		i := i
 		go func() {
-			args := &RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log) - 1, rf.log[len(rf.log)-1].term}
+			args := &RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log) - 1, rf.log[len(rf.log)-1].Term}
 			reply := &RequestVoteReply{}
 			ok := rf.sendRequestVote(i, args, reply)
 			if ok {
