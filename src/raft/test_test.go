@@ -48,7 +48,6 @@ func TestReElection2A(t *testing.T) {
 
 	leader1 := cfg.checkOneLeader()
 
-
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	//DPrintf("Now disconnect %d\n", leader1)
@@ -93,7 +92,6 @@ func TestBasicAgree2B(t *testing.T) {
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
 		}
-
 		xindex := cfg.one(index*100, servers)
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)

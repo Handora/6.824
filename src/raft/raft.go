@@ -65,6 +65,7 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	applyCh   chan ApplyMsg
+	cond      *sync.Cond
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -87,15 +88,14 @@ type Raft struct {
 // Raft's server state
 //
 const (
-	FOLLOWER  = 0
-	LEADER    = 1
-	CANDIDATE = 2
+	FOLLOWER = iota
+	LEADER
+	CANDIDATE
 )
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isLeader bool
 	// Your code here (2A).
@@ -171,7 +171,7 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) electionRestriction(args *RequestVoteArgs) bool {
 	if args.LastLogTerm == rf.currentTerm {
-		return args.LastLogIndex > len(rf.log)
+		return args.LastLogIndex >= len(rf.log)-1
 	}
 	return args.LastLogTerm > rf.currentTerm
 }
@@ -198,7 +198,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// we should enhance once we found we are outdated
 
-
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = FOLLOWER
@@ -206,7 +205,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	rf.sh <- 1
 
-	if rf.votedFor == nil || rf.votedFor == rf.peers[args.CandidateId] {
+	if rf.votedFor == nil || rf.votedFor == rf.peers[args.CandidateId] && rf.electionRestriction(args) {
 		rf.votedFor = rf.peers[args.CandidateId]
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
@@ -304,7 +303,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// according to paper 5.3
 	var i int
 	for i = 0; i < len(args.Entries); i++ {
-		if rf.log[args.PrevLogIndex+i+1].Term != args.Entries[i].Term {
+		if args.PrevLogIndex+i+1 < len(rf.log) && rf.log[args.PrevLogIndex+i+1].Term != args.Entries[i].Term {
 			break
 		}
 	}
@@ -316,12 +315,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, len(rf.log))
-		if rf.commitIndex > rf.lastApplied {
-			rf.lastApplied = rf.commitIndex
-			// TODO
-			// apply to state machine
-		}
+		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		rf.cond.Signal()
 	}
 
 	reply.Success = true
@@ -348,12 +343,20 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	index := len(rf.log)
+	term := rf.currentTerm
+	isLeader := rf.state == LEADER
+
+	if !isLeader {
+		return index, term, isLeader
+	}
 
 	// Your code here (2B).
 
+	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
 	return index, term, isLeader
 }
 
@@ -394,6 +397,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.cond = sync.NewCond(&rf.mu)
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rand.Seed(time.Now().UnixNano() + int64(me))
@@ -405,6 +409,33 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	srv := labrpc.MakeService(rf)
 	rpcs := labrpc.MakeServer()
 	rpcs.AddService(srv)
+
+	// apply the command when commitIndex > lastA
+	go func() {
+		for {
+			rf.mu.Lock()
+			for rf.commitIndex == rf.lastApplied {
+				rf.cond.Wait()
+			}
+
+			if rf.commitIndex < rf.lastApplied {
+				DPrintf("some error happened for rf.commitIndex < rf.lastApplied")
+			}
+
+			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+				// we can go routine, client can tell the difference through msg.Index
+				rf.lastApplied++
+				index := rf.lastApplied
+				command := rf.log[rf.lastApplied].Command
+				go func() {
+					app := ApplyMsg{Index: index, Command: command}
+					rf.applyCh <- app
+				}()
+			}
+
+			rf.mu.Unlock()
+		}
+	}()
 
 	go func() {
 		for {
@@ -493,6 +524,26 @@ func (rf *Raft) doLeader() {
 							}
 						} else {
 							rf.nextIndex[i] = rf.nextIndex[i] + len(args.Entries)
+							rf.matchIndex[i] = rf.nextIndex[i] - 1
+							k := len(rf.log) - 1
+							for rf.log[k].Term == rf.currentTerm {
+								sum := 0
+								for j := 0; j < len(rf.peers); j++ {
+									if rf.matchIndex[j] >= k {
+										sum++
+										if sum >= len(rf.peers)/2 {
+											goto COMMIT_IT
+										}
+									}
+								}
+								k--
+							}
+							return
+
+						COMMIT_IT:
+							rf.commitIndex = k
+							rf.cond.Signal()
+							return
 						}
 					}
 				}()

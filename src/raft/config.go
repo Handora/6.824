@@ -434,7 +434,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 
 // personal leader check
 func (cfg *config) dump() {
-	for i:=0; i<len(cfg.rafts); i++ {
+	for i := 0; i < len(cfg.rafts); i++ {
 		term, lead := cfg.rafts[i].GetState()
 		DPrintf("%d(%d) is %v lead", i, term, lead)
 	}
