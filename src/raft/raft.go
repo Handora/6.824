@@ -301,13 +301,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// if an existing entry conflicts with a new one, delete the existing entry and all those follow it
 	// according to paper 5.3
+	DPrintf("%v", args.Entries)
+	DPrintf("%v", rf.log)
+	DPrintf("%d", args.PrevLogIndex)
 	var i int
 	for i = 0; i < len(args.Entries); i++ {
-		if args.PrevLogIndex+i+1 < len(rf.log) && rf.log[args.PrevLogIndex+i+1].Term != args.Entries[i].Term {
+		if args.PrevLogIndex+i+1 >= len(rf.log) || rf.log[args.PrevLogIndex+i+1].Term != args.Entries[i].Term {
 			break
 		}
 	}
-	if i != len(args.Entries) {
+	if args.PrevLogIndex+i+1 < len(rf.log) && i != len(args.Entries) {
 		rf.log = rf.log[:args.PrevLogTerm+i+1]
 	}
 	for ; i < len(args.Entries); i++ {
@@ -430,6 +433,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				go func() {
 					app := ApplyMsg{Index: index, Command: command}
 					rf.applyCh <- app
+					DPrintf("commit %v %d for %d(%s)", command, index, rf.me, STATE[rf.state])
 				}()
 			}
 
@@ -494,8 +498,6 @@ func (rf *Raft) doLeader() {
 				}
 				i := i
 				go func() {
-					// TODO:
-					//    now only support heartbeat, it's likely to combine heartbeat and AppendEntries together
 					rf.mu.Lock()
 					var entries []LogEntry
 					if rf.nextIndex[i] < len(rf.log) {
@@ -523,6 +525,9 @@ func (rf *Raft) doLeader() {
 								rf.nextIndex[i]--
 							}
 						} else {
+							if len(args.Entries) == 0 {
+								return
+							}
 							rf.nextIndex[i] = rf.nextIndex[i] + len(args.Entries)
 							rf.matchIndex[i] = rf.nextIndex[i] - 1
 							k := len(rf.log) - 1

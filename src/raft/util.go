@@ -1,9 +1,13 @@
 package raft
 
-import "log"
+import (
+	"log"
+)
 
 // Debugging
 const Debug = 1
+
+var STATE = [3]string{"FOLLOWER", "LEADER", "CANDIDATE"}
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
