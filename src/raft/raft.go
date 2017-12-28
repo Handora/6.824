@@ -33,7 +33,7 @@ import (
 const (
 	DefaultSliceLength = 100
 	DefaultTermBottom  = 300
-	DefaultTermTop     = 400
+	DefaultTermTop     = 500
 )
 
 //
@@ -53,7 +53,7 @@ type ApplyMsg struct {
 //
 type LogEntry struct {
 	Term    int
-	Command string
+	Command interface{}
 }
 
 //
@@ -64,6 +64,7 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
+	applyCh   chan ApplyMsg
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -86,8 +87,8 @@ type Raft struct {
 // Raft's server state
 //
 const (
-	FOLLOWER = 0
-	LEADER = 1
+	FOLLOWER  = 0
+	LEADER    = 1
 	CANDIDATE = 2
 )
 
@@ -98,8 +99,11 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isLeader bool
 	// Your code here (2A).
+
+	rf.mu.Lock()
 	term = rf.currentTerm
 	isLeader = rf.state == LEADER
+	rf.mu.Unlock()
 
 	return term, isLeader
 }
@@ -179,8 +183,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// DPrintf("node %d(term: %d) receive request votes from %d(%d)", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 	// TODO:
+	//    better lock statement
 	// 		make more clean code
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	// refuse outdated request
 	if args.Term < rf.currentTerm {
@@ -190,6 +197,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	// we should enhance once we found we are outdated
+
+
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = FOLLOWER
@@ -267,12 +276,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// DPrintf("node %d(%d) receive append entry from leader %d(%d)\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
 
 	// refuse outdated request
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
-
 
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
@@ -300,7 +311,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if i != len(args.Entries) {
 		rf.log = rf.log[:args.PrevLogTerm+i+1]
 	}
-	for ; i < len(args.Entries) ; i++ {
+	for ; i < len(args.Entries); i++ {
 		rf.log = append(rf.log, args.Entries[i])
 	}
 
@@ -373,6 +384,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 0
@@ -388,7 +400,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// ensure the first index is 1
 	rf.log = make([]LogEntry, 1, DefaultSliceLength)
-
 	rf.sh = make(chan int, 10)
 
 	srv := labrpc.MakeService(rf)
@@ -397,6 +408,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go func() {
 		for {
+			rf.mu.Lock()
+			// must guarantee the lock is closed in the following do* function
 			switch rf.state {
 			case FOLLOWER:
 				rf.doFollower()
@@ -410,14 +423,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 	return rf
 }
 
 func (rf *Raft) doFollower() {
+	rf.mu.Unlock()
 	select {
-	case <-time.After(time.Duration(rand.Intn(DefaultTermTop-DefaultTermBottom)+DefaultTermBottom)*time.Millisecond):
+	case <-time.After(time.Duration(rand.Intn(DefaultTermTop-DefaultTermBottom)+DefaultTermBottom) * time.Millisecond):
+		rf.mu.Lock()
 		rf.state = CANDIDATE
+		rf.mu.Unlock()
 		return
 	case <-rf.sh:
 		return
@@ -429,55 +444,64 @@ func (rf *Raft) doLeader() {
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = 0
 	}
-
+	rf.mu.Unlock()
 	// send heartbeat or heartbeat to all peers
 
 	go func() {
 		for {
-			for i := 0; i < len(rf.peers); i++ {
+			// not the leader, don't send out append
+			rf.mu.Lock()
+			if rf.state != LEADER {
+				rf.mu.Unlock()
+				break
+			}
+			for i := 0; i < len(rf.peers) && rf.state == LEADER; i++ {
+				rf.mu.Unlock()
 				if i == rf.me {
+					rf.mu.Lock()
 					continue
 				}
 				i := i
 				go func() {
 					// TODO:
 					//    now only support heartbeat, it's likely to combine heartbeat and AppendEntries together
-					for rf.state == LEADER {
-						var entries []LogEntry
-						if rf.nextIndex[i] < len(rf.log) {
-							entries = rf.log[rf.nextIndex[i]:]
-						} else {
-							entries = make([]LogEntry, 0)
-						}
-						args := &AppendEntriesArgs{rf.currentTerm, rf.me, rf.nextIndex[i] - 1,
-							rf.log[rf.nextIndex[i]-1].Term, entries, rf.commitIndex}
+					rf.mu.Lock()
+					var entries []LogEntry
+					if rf.nextIndex[i] < len(rf.log) {
+						entries = rf.log[rf.nextIndex[i]:]
+					} else {
+						entries = make([]LogEntry, 0)
+					}
+					args := &AppendEntriesArgs{rf.currentTerm, rf.me, rf.nextIndex[i] - 1,
+						rf.log[rf.nextIndex[i]-1].Term, entries, rf.commitIndex}
+					reply := &AppendEntriesReply{}
+					rf.mu.Unlock()
 
-						reply := &AppendEntriesReply{}
-
-						ok := rf.sendAppendEntries(i, args, reply)
-						if ok {
-							if !reply.Success {
-								if reply.Term > rf.currentTerm {
-									rf.currentTerm = reply.Term
-									rf.state = FOLLOWER
-									rf.sh <- 1
-									rf.votedFor = nil
-									return
-								} else {
-									rf.nextIndex[i]--
-								}
+					ok := rf.sendAppendEntries(i, args, reply)
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+					if ok {
+						if !reply.Success {
+							if reply.Term > rf.currentTerm {
+								rf.currentTerm = reply.Term
+								rf.state = FOLLOWER
+								rf.sh <- 1
+								rf.votedFor = nil
+								return
 							} else {
-								rf.nextIndex[i] = rf.nextIndex[i] + len(args.Entries)
+								rf.nextIndex[i]--
 							}
+						} else {
+							rf.nextIndex[i] = rf.nextIndex[i] + len(args.Entries)
 						}
 					}
 				}()
+				rf.mu.Lock()
 			}
-			time.Sleep(150*time.Millisecond)
+			rf.mu.Unlock()
+			time.Sleep(150 * time.Millisecond)
 		}
 	}()
-
-
 
 	select {
 	case <-rf.sh:
@@ -491,6 +515,8 @@ func (rf *Raft) doCandidate() {
 	rf.votedFor = rf.peers[rf.me]
 	rf.votes = 1
 
+	rf.mu.Unlock()
+
 	for i := 0; i < len(rf.peers); i++ {
 
 		i := i
@@ -498,10 +524,14 @@ func (rf *Raft) doCandidate() {
 			continue
 		}
 		go func() {
+			rf.mu.Lock()
 			args := &RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log) - 1, rf.log[len(rf.log)-1].Term}
 			reply := &RequestVoteReply{}
+			rf.mu.Unlock()
 
 			ok := rf.sendRequestVote(i, args, reply)
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
 			if ok {
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
@@ -517,7 +547,7 @@ func (rf *Raft) doCandidate() {
 					// DPrintf("ok for %d to %d\n", i, rf.me)
 					rf.votes++
 					if rf.votes >= len(rf.peers)/2+1 {
-						DPrintf("%d(%d) becomes leader", rf.me, rf.currentTerm)
+						// DPrintf("%d(%d) becomes leader", rf.me, rf.currentTerm)
 						rf.state = LEADER
 						rf.sh <- 1
 					}
@@ -529,7 +559,7 @@ func (rf *Raft) doCandidate() {
 	}
 
 	select {
-	case <-time.After(time.Duration(rand.Intn(DefaultTermTop-DefaultTermBottom)+DefaultTermBottom)*time.Millisecond):
+	case <-time.After(time.Duration(rand.Intn(DefaultTermTop-DefaultTermBottom)+DefaultTermBottom) * time.Millisecond):
 		return
 	case <-rf.sh:
 		return

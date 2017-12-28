@@ -28,7 +28,6 @@ func TestInitialElection2A(t *testing.T) {
 
 	// is a leader elected?
 	cfg.checkOneLeader()
-
 	// does the leader+term stay the same if there is no network failure?
 	term1 := cfg.checkTerms()
 	time.Sleep(2 * RaftElectionTimeout)
@@ -54,12 +53,12 @@ func TestReElection2A(t *testing.T) {
 	cfg.disconnect(leader1)
 	//DPrintf("Now disconnect %d\n", leader1)
 	cfg.checkOneLeader()
-	cfg.dump()
+	// cfg.dump()
 	// if the old leader rejoins, that shouldn't
 	// disturb the old leader.
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
-	cfg.dump()
+	// cfg.dump()
 
 	// if there's no quorum, no leader should
 	// be elected.
