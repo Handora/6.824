@@ -13,7 +13,9 @@ import "fmt"
 import "time"
 import "math/rand"
 import "sync/atomic"
-import "sync"
+import (
+	"sync"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -113,6 +115,7 @@ func TestFailAgree2B(t *testing.T) {
 	// follower network disconnection
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
+	// DPrintf("Disconnect %d", (leader + 1) % servers)
 
 	// agree despite one disconnected server?
 	cfg.one(102, servers-1)
@@ -121,6 +124,7 @@ func TestFailAgree2B(t *testing.T) {
 	cfg.one(104, servers-1)
 	cfg.one(105, servers-1)
 
+	// DPrintf("Reconnect")
 	// re-connect
 	cfg.connect((leader + 1) % servers)
 
@@ -337,12 +341,10 @@ func TestBackup2B(t *testing.T) {
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
-
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
 	}
-
 	time.Sleep(RaftElectionTimeout / 2)
 
 	cfg.disconnect((leader1 + 0) % servers)
@@ -385,11 +387,12 @@ func TestBackup2B(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3)
 	}
-
+	// Debug =1
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
+
 	cfg.one(rand.Int(), servers)
 
 	fmt.Printf("  ... Passed\n")
