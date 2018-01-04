@@ -278,6 +278,11 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	// accelerated log backtracking optimization
+	// paper page8 upper left
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -310,9 +315,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// return false if log doesn't matches PrevLogTerm and PrevLogIndex
-	if len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if len(rf.log) <= args.PrevLogIndex {
+		reply.ConflictIndex = len(rf.log)
+		reply.ConflictTerm = -1
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		needPersist = true
+		return
+	}
+
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+		for i := args.PrevLogIndex - 1; i >= 0; i-- {
+			if rf.log[i].Term != reply.ConflictTerm {
+				reply.ConflictIndex = i + 1
+				break
+			}
+		}
+
+		rf.log = rf.log[:args.PrevLogIndex]
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		needPersist = true
 		return
 	}
 
@@ -556,6 +580,11 @@ func (rf *Raft) doLeader() {
 						ok := rf.sendAppendEntries(i, args, reply)
 						rf.mu.Lock()
 
+						if rf.state != LEADER {
+							rf.mu.Unlock()
+							return
+						}
+
 						if ok {
 							if reply.Success == false {
 								if reply.Term > rf.currentTerm {
@@ -578,7 +607,18 @@ func (rf *Raft) doLeader() {
 									rf.mu.Unlock()
 									return
 								} else {
-									rf.nextIndex[i] = nextIndex - 1
+									var j int
+									for j = len(rf.log) - 1; j >= 0; j-- {
+										if reply.ConflictTerm == rf.log[j].Term {
+											rf.nextIndex[i] = j + 1
+											break
+										}
+									}
+
+									if j < 0 {
+										rf.nextIndex[i] = reply.ConflictIndex
+									}
+
 								}
 							} else {
 								if reply.Term < rf.currentTerm {
