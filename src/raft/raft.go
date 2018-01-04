@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"bytes"
+	"encoding/gob"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -72,14 +74,13 @@ type Raft struct {
 	// state a Raft server must maintain.
 	currentTerm int
 	state       int
-	votedFor    *labrpc.ClientEnd
+	votedFor    int
 	log         []LogEntry
 	commitIndex int
 	lastApplied int
 	votes       int
 	sh          chan int
 
-	// volatile state on leaders
 	nextIndex  []int
 	matchIndex []int
 }
@@ -98,12 +99,12 @@ const (
 func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isLeader bool
-	// Your code here (2A).
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	term = rf.currentTerm
 	isLeader = rf.state == LEADER
-	rf.mu.Unlock()
 
 	return term, isLeader
 }
@@ -122,6 +123,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -137,6 +145,14 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.log)
 }
 
 //
@@ -144,8 +160,6 @@ func (rf *Raft) readPersist(data []byte) {
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-
 	// as specialized by paper Figure 2
 	Term         int
 	CandidateId  int
@@ -158,17 +172,13 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 //
 type RequestVoteReply struct {
-	// Your data here (2A).
-
 	// as specialized by paper Figure 2
 	Term        int
 	VoteGranted bool
 }
 
-// TODO:
 // Election restriction implementation
 // paper 5.4.1
-//
 func (rf *Raft) electionRestriction(args *RequestVoteArgs) bool {
 	if args.LastLogTerm == rf.log[len(rf.log)-1].Term {
 		return args.LastLogIndex >= len(rf.log)-1
@@ -180,13 +190,14 @@ func (rf *Raft) electionRestriction(args *RequestVoteArgs) bool {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-	// TODO:
-	//    better lock statement
-	// 		make more clean code
-
+	needPersist := false
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	defer func() {
+		if needPersist {
+			rf.persist()
+		}
+		rf.mu.Unlock()
+	}()
 
 	// refuse outdated request
 	if args.Term < rf.currentTerm {
@@ -195,19 +206,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	// we should enhance once we found we are outdated
-
+	// we should become follower and become up to date
+	// once we found we are outdated
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = FOLLOWER
-		rf.votedFor = nil
+		rf.votedFor = -1
+		needPersist = true
 	}
-	rf.sh <- 1
 
-	if (rf.votedFor == nil || rf.votedFor == rf.peers[args.CandidateId]) && rf.electionRestriction(args) {
-		rf.votedFor = rf.peers[args.CandidateId]
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.electionRestriction(args) {
+		rf.sh <- 1
+		rf.votedFor = args.CandidateId
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
+		needPersist = true
 		return
 	}
 
@@ -268,26 +281,33 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// TODO
-	//   clean code
-
-	// refuse outdated request
+	needPersist := false
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	defer func() {
+		if needPersist {
+			rf.persist()
+		}
+		rf.mu.Unlock()
+	}()
 
+	// refuse out of date request
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 
+	// wake up and reset the timer
+	rf.sh <- 1
+
+	// we should become follower and become up to date
+	// once we found we are outdated
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
-		rf.votedFor = nil
+		rf.votedFor = -1
 		rf.state = FOLLOWER
-		rf.votes = 0
+		needPersist = true
 	}
-	rf.sh <- 1
 
 	// return false if log doesn't matches PrevLogTerm and PrevLogIndex
 	if len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
@@ -296,28 +316,49 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// if an existing entry conflicts with a new one, delete the existing entry and all those follow it
-	// according to paper 5.3
-
+	/*
+		If the follower has all the entries the leader sent, the follower
+		MUST NOT truncate its log. Any elements following the entries sent
+		by the leader MUST be kept. This is because we could be receiving
+		an outdated AppendEntries RPC from the leader, and truncating the
+		log would mean “taking back” entries that we may have already told
+		the leader that we have in our log.
+	*/
+	// according to student's advice
 	var i int
 	for i = 0; i < len(args.Entries); i++ {
 		if args.PrevLogIndex+i+1 >= len(rf.log) || rf.log[args.PrevLogIndex+i+1].Term != args.Entries[i].Term {
 			break
 		}
 	}
-
-	if args.PrevLogIndex+i+1 <= len(rf.log) && i <= len(args.Entries) {
+	if args.PrevLogIndex+i+1 < len(rf.log) && i <= len(args.Entries) {
 		rf.log = rf.log[:args.PrevLogIndex+i+1]
+		needPersist = true
 	}
 
 	for ; i < len(args.Entries); i++ {
 		rf.log = append(rf.log, args.Entries[i])
+		needPersist = true
 	}
 
+	// commit according to args.LeaderCommit
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		/*
+			The min in the final step (#5) of AppendEntries is necessary, and it needs to be computed
+			with the index of the last new entry. It is not sufficient to simply have the function
+			that applies things from your log between lastApplied and commitIndex stop when it reaches
+			the end of your log. This is because you may have entries in your log that differ from the
+			leader’s log after the entries that the leader sent you (which all match the ones in your log).
+			 Because #3 dictates that you only truncate your log if you have conflicting entries, those
+			 won’t be removed, and if leaderCommit is beyond the entries the leader sent you,
+			 you may apply incorrect entries.
+
+			 from students-guide-to-raft
+		*/
+		rf.commitIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
 		rf.cond.Signal()
 	}
+
 	reply.Success = true
 	reply.Term = rf.currentTerm
 	return
@@ -354,9 +395,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 
-	// Your code here (2B).
-
 	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
+	rf.persist()
 	return index, term, isLeader
 }
 
@@ -392,7 +432,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 0
 	rf.mu = sync.Mutex{}
-	rf.votedFor = nil
+	rf.votedFor = -1
 	rf.votes = 0
 	rf.state = FOLLOWER
 	rf.commitIndex = 0
@@ -407,6 +447,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = append(rf.log, LogEntry{Term: 0, Command: nil})
 	rf.sh = make(chan int, 10)
 
+	// rf.readPersist(rf.persister.ReadRaftState())
+
+	// set up the rpc server
 	srv := labrpc.MakeService(rf)
 	rpcs := labrpc.MakeServer()
 	rpcs.AddService(srv)
@@ -431,6 +474,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		}
 	}()
 
+	// state machine
 	go func() {
 		for {
 			rf.mu.Lock()
@@ -452,6 +496,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
+// state: follower
 func (rf *Raft) doFollower() {
 	rf.mu.Unlock()
 	select {
@@ -465,6 +510,7 @@ func (rf *Raft) doFollower() {
 	}
 }
 
+// state: leader
 func (rf *Raft) doLeader() {
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = len(rf.log)
@@ -516,23 +562,48 @@ func (rf *Raft) doLeader() {
 									rf.currentTerm = reply.Term
 									rf.state = FOLLOWER
 									rf.sh <- 1
-									rf.votedFor = nil
+									rf.votedFor = -1
+									rf.persist()
+									rf.mu.Unlock()
+									return
+								} else if reply.Term < rf.currentTerm {
+									/*
+									  If a leader sends out an AppendEntries RPC, and it is rejected, but not because of log
+									  inconsistency (this can only happen if our term has passed), then you should immediately
+									  step down, and not update nextIndex. If you do, you could race with the resetting of nextIndex
+									  if you are re-elected immediately.
+
+									  from students-guide-to-raft
+									*/
 									rf.mu.Unlock()
 									return
 								} else {
-									if nextIndex-1 > 0 {
-										rf.nextIndex[i] = nextIndex - 1
-									} else {
-										rf.nextIndex[i] = 1
-									}
+									rf.nextIndex[i] = nextIndex - 1
 								}
 							} else {
+								if reply.Term < rf.currentTerm {
+									rf.mu.Unlock()
+									return
+								}
 								if len(entries) == 0 {
 									rf.mu.Unlock()
 									return
 								}
-								rf.nextIndex[i] = nextIndex + len(entries)
-								rf.matchIndex[i] = rf.nextIndex[i] - 1
+								if rf.nextIndex[i] < nextIndex+len(entries) {
+									rf.nextIndex[i] = nextIndex + len(entries)
+								}
+								rf.matchIndex[i] = nextIndex - 1 + len(entries)
+								/*
+									A leader is not allowed to update commitIndex to somewhere in
+									a previous term (or, for that matter, a future term). Thus,
+									as the rule says, you specifically need to check that
+									log[N].term == currentTerm. This is because Raft leaders cannot
+									be sure an entry is actually committed (and will not ever be
+									changed in the future) if it’s not from their current term.
+									This is illustrated by Figure 8 in the paper.
+
+									from students-guide-to-raft
+								*/
 								k := len(rf.log) - 1
 								for rf.log[k].Term == rf.currentTerm {
 									sum := 0
@@ -573,13 +644,11 @@ func (rf *Raft) doLeader() {
 // STATE: Candidate
 func (rf *Raft) doCandidate() {
 	rf.currentTerm++
-	rf.votedFor = rf.peers[rf.me]
+	rf.votedFor = rf.me
 	rf.votes = 1
-
 	rf.mu.Unlock()
 
 	for i := 0; i < len(rf.peers); i++ {
-
 		i := i
 		if i == rf.me {
 			continue
@@ -588,17 +657,26 @@ func (rf *Raft) doCandidate() {
 			rf.mu.Lock()
 			args := &RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log) - 1, rf.log[len(rf.log)-1].Term}
 			reply := &RequestVoteReply{}
-			rf.mu.Unlock()
 
+			rf.mu.Unlock()
 			ok := rf.sendRequestVote(i, args, reply)
 			rf.mu.Lock()
-			defer rf.mu.Unlock()
+
+			needPersist := false
+			defer func() {
+				if needPersist {
+					rf.persist()
+				}
+				rf.mu.Unlock()
+			}()
+
 			if ok {
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.state = FOLLOWER
-					rf.votedFor = nil
+					rf.votedFor = -1
 					rf.sh <- 1
+					needPersist = true
 					return
 				} else if reply.Term < rf.currentTerm {
 					return
@@ -610,8 +688,6 @@ func (rf *Raft) doCandidate() {
 						rf.state = LEADER
 						rf.sh <- 1
 					}
-
-					return
 				}
 			}
 		}()
