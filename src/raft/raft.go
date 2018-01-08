@@ -48,6 +48,7 @@ type ApplyMsg struct {
 	Command     interface{}
 	UseSnapshot bool   // ignore for lab2; only used in lab3
 	Snapshot    []byte // ignore for lab2; only used in lab3
+	Term        int
 }
 
 //
@@ -75,7 +76,7 @@ type Raft struct {
 	currentTerm int
 	state       int
 	votedFor    int
-	log         []LogEntry
+	Log         []LogEntry
 	commitIndex int
 	lastApplied int
 	votes       int
@@ -129,7 +130,7 @@ func (rf *Raft) persist() {
 	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
+	e.Encode(rf.Log)
 	data := w.Bytes()
 	go rf.persister.SaveRaftState(data)
 }
@@ -154,7 +155,7 @@ func (rf *Raft) readPersist(data []byte) {
 	d := gob.NewDecoder(r)
 	d.Decode(&rf.currentTerm)
 	d.Decode(&rf.votedFor)
-	d.Decode(&rf.log)
+	d.Decode(&rf.Log)
 }
 
 //
@@ -182,10 +183,10 @@ type RequestVoteReply struct {
 // Election restriction implementation
 // paper 5.4.1
 func (rf *Raft) electionRestriction(args *RequestVoteArgs) bool {
-	if args.LastLogTerm == rf.log[len(rf.log)-1].Term {
-		return args.LastLogIndex >= len(rf.log)-1
+	if args.LastLogTerm == rf.Log[len(rf.Log)-1].Term {
+		return args.LastLogIndex >= len(rf.Log)-1
 	}
-	return args.LastLogTerm > rf.log[len(rf.log)-1].Term
+	return args.LastLogTerm > rf.Log[len(rf.Log)-1].Term
 }
 
 //
@@ -317,8 +318,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// return false if log doesn't matches PrevLogTerm and PrevLogIndex
-	if len(rf.log) <= args.PrevLogIndex {
-		reply.ConflictIndex = len(rf.log)
+	if len(rf.Log) <= args.PrevLogIndex {
+		reply.ConflictIndex = len(rf.Log)
 		reply.ConflictTerm = -1
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -326,16 +327,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+	if rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.Log[args.PrevLogIndex].Term
 		for i := args.PrevLogIndex - 1; i >= 0; i-- {
-			if rf.log[i].Term != reply.ConflictTerm {
+			if rf.Log[i].Term != reply.ConflictTerm {
 				reply.ConflictIndex = i + 1
 				break
 			}
 		}
 
-		rf.log = rf.log[:args.PrevLogIndex]
+		rf.Log = rf.Log[:args.PrevLogIndex]
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		needPersist = true
@@ -353,17 +354,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// according to student's advice
 	var i int
 	for i = 0; i < len(args.Entries); i++ {
-		if args.PrevLogIndex+i+1 >= len(rf.log) || rf.log[args.PrevLogIndex+i+1].Term != args.Entries[i].Term {
+		if args.PrevLogIndex+i+1 >= len(rf.Log) || rf.Log[args.PrevLogIndex+i+1].Term != args.Entries[i].Term {
 			break
 		}
 	}
-	if args.PrevLogIndex+i+1 < len(rf.log) {
-		rf.log = rf.log[:args.PrevLogIndex+i+1]
+	if args.PrevLogIndex+i+1 < len(rf.Log) {
+		rf.Log = rf.Log[:args.PrevLogIndex+i+1]
 		needPersist = true
 	}
 
 	for ; i < len(args.Entries); i++ {
-		rf.log = append(rf.log, args.Entries[i])
+		rf.Log = append(rf.Log, args.Entries[i])
 		needPersist = true
 	}
 
@@ -413,7 +414,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	index := len(rf.log)
+	index := len(rf.Log)
 	term := rf.currentTerm
 	isLeader := rf.state == LEADER
 
@@ -421,7 +422,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 
-	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
+	rf.Log = append(rf.Log, LogEntry{Term: rf.currentTerm, Command: command})
 	go rf.persist()
 	return index, term, isLeader
 }
@@ -469,8 +470,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rand.Seed(time.Now().UnixNano() + int64(me))
 
 	// ensure the first index is 1
-	rf.log = make([]LogEntry, 0, DefaultSliceLength)
-	rf.log = append(rf.log, LogEntry{Term: 0, Command: nil})
+	rf.Log = make([]LogEntry, 0, DefaultSliceLength)
+	rf.Log = append(rf.Log, LogEntry{Term: 0, Command: nil})
 	rf.sh = make(chan int, 10)
 
 	// rf.readPersist(rf.persister.ReadRaftState())
@@ -486,8 +487,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				rf.lastApplied++
 				index := rf.lastApplied
-				command := rf.log[rf.lastApplied].Command
-				app := ApplyMsg{Index: index, Command: command}
+				command := rf.Log[rf.lastApplied].Command
+				app := ApplyMsg{Index: index, Command: command, Term: rf.Log[rf.lastApplied].Term}
 				rf.applyCh <- app
 			}
 
@@ -534,7 +535,7 @@ func (rf *Raft) doFollower() {
 // state: leader
 func (rf *Raft) doLeader() {
 	for i := 0; i < len(rf.peers); i++ {
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = len(rf.Log)
 		rf.matchIndex[i] = 0
 	}
 	rf.mu.Unlock()
@@ -564,13 +565,13 @@ func (rf *Raft) doLeader() {
 						}
 						var entries []LogEntry
 						nextIndex := rf.nextIndex[i]
-						if nextIndex < len(rf.log) {
-							entries = rf.log[nextIndex:]
+						if nextIndex < len(rf.Log) {
+							entries = rf.Log[nextIndex:]
 						} else {
 							entries = make([]LogEntry, 0)
 						}
 						args := &AppendEntriesArgs{rf.currentTerm, rf.me, nextIndex - 1,
-							rf.log[nextIndex-1].Term, entries, rf.commitIndex}
+							rf.Log[nextIndex-1].Term, entries, rf.commitIndex}
 						reply := &AppendEntriesReply{}
 
 						rf.mu.Unlock()
@@ -605,12 +606,12 @@ func (rf *Raft) doLeader() {
 									return
 								} else {
 									var j int
-									for j = len(rf.log) - 1; j >= 0; j-- {
-										if rf.log[j].Term < reply.ConflictTerm {
+									for j = len(rf.Log) - 1; j >= 0; j-- {
+										if rf.Log[j].Term < reply.ConflictTerm {
 											rf.nextIndex[i] = reply.ConflictIndex
 											break
 										}
-										if reply.ConflictTerm == rf.log[j].Term {
+										if reply.ConflictTerm == rf.Log[j].Term {
 											rf.nextIndex[i] = j + 1
 											break
 										}
@@ -644,8 +645,8 @@ func (rf *Raft) doLeader() {
 
 									from students-guide-to-raft
 								*/
-								k := len(rf.log) - 1
-								for rf.log[k].Term == rf.currentTerm {
+								k := len(rf.Log) - 1
+								for rf.Log[k].Term == rf.currentTerm {
 									sum := 0
 									for j := 0; j < len(rf.peers); j++ {
 										if rf.matchIndex[j] >= k {
@@ -695,7 +696,7 @@ func (rf *Raft) doCandidate() {
 		}
 		go func() {
 			rf.mu.Lock()
-			args := &RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log) - 1, rf.log[len(rf.log)-1].Term}
+			args := &RequestVoteArgs{rf.currentTerm, rf.me, len(rf.Log) - 1, rf.Log[len(rf.Log)-1].Term}
 			reply := &RequestVoteReply{}
 
 			rf.mu.Unlock()
