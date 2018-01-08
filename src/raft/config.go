@@ -389,6 +389,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 func (cfg *config) one(cmd int, expectedServers int) int {
 	t0 := time.Now()
 	starts := 0
+	ok := 1
 	for time.Since(t0).Seconds() < 10 {
 		// try all the servers, maybe one is the leader.
 		index := -1
@@ -410,6 +411,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 		}
 
 		if index != -1 {
+			ok = 2
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
@@ -428,7 +430,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+	cfg.t.Fatalf("one(%v) failed to reach agreement with turn %d", cmd, ok)
 	return -1
 }
 

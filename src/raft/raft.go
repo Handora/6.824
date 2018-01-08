@@ -473,11 +473,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// rf.readPersist(rf.persister.ReadRaftState())
 
-	// set up the rpc server
-	srv := labrpc.MakeService(rf)
-	rpcs := labrpc.MakeServer()
-	rpcs.AddService(srv)
-
 	// apply the command when commitIndex > lastA
 	go func() {
 		for {
@@ -618,7 +613,6 @@ func (rf *Raft) doLeader() {
 									if j < 0 {
 										rf.nextIndex[i] = reply.ConflictIndex
 									}
-
 								}
 							} else {
 								if reply.Term < rf.currentTerm {
@@ -671,7 +665,7 @@ func (rf *Raft) doLeader() {
 				rf.mu.Lock()
 			}
 			rf.mu.Unlock()
-			time.Sleep(150 * time.Millisecond)
+			time.Sleep(120 * time.Millisecond)
 		}
 	}()
 
