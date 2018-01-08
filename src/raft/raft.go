@@ -123,13 +123,15 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	go rf.persister.SaveRaftState(data)
 }
 
 //
@@ -194,7 +196,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer func() {
 		if needPersist {
-			rf.persist()
+			go rf.persist()
 		}
 		rf.mu.Unlock()
 	}()
@@ -290,7 +292,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer func() {
 		if needPersist {
-			rf.persist()
+			go rf.persist()
 		}
 		rf.mu.Unlock()
 	}()
@@ -355,7 +357,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			break
 		}
 	}
-	if args.PrevLogIndex+i+1 < len(rf.log) && i <= len(args.Entries) {
+	if args.PrevLogIndex+i+1 < len(rf.log) {
 		rf.log = rf.log[:args.PrevLogIndex+i+1]
 		needPersist = true
 	}
@@ -420,7 +422,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
-	rf.persist()
+	go rf.persist()
 	return index, term, isLeader
 }
 
@@ -587,7 +589,7 @@ func (rf *Raft) doLeader() {
 									rf.state = FOLLOWER
 									rf.sh <- 1
 									rf.votedFor = -1
-									rf.persist()
+									go rf.persist()
 									rf.mu.Unlock()
 									return
 								} else if reply.Term < rf.currentTerm {
@@ -604,6 +606,10 @@ func (rf *Raft) doLeader() {
 								} else {
 									var j int
 									for j = len(rf.log) - 1; j >= 0; j-- {
+										if rf.log[j].Term < reply.ConflictTerm {
+											rf.nextIndex[i] = reply.ConflictIndex
+											break
+										}
 										if reply.ConflictTerm == rf.log[j].Term {
 											rf.nextIndex[i] = j + 1
 											break
@@ -665,7 +671,7 @@ func (rf *Raft) doLeader() {
 				rf.mu.Lock()
 			}
 			rf.mu.Unlock()
-			time.Sleep(120 * time.Millisecond)
+			time.Sleep(150 * time.Millisecond)
 		}
 	}()
 
@@ -699,7 +705,7 @@ func (rf *Raft) doCandidate() {
 			needPersist := false
 			defer func() {
 				if needPersist {
-					rf.persist()
+					go rf.persist()
 				}
 				rf.mu.Unlock()
 			}()
