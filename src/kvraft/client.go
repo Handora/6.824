@@ -46,9 +46,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	args := GetArgs{}
-	reply := GetReply{}
-	args.Key = key
+
 	var i int
 	if ck.lastLeaderId < 0 {
 		i = ck.rdom.Int() % len(ck.servers)
@@ -57,7 +55,10 @@ func (ck *Clerk) Get(key string) string {
 	}
 
 	for {
-		ok := ck.servers[i].Call("RaftKV.Get", &args, &reply)
+		args := &GetArgs{}
+		reply := &GetReply{}
+		args.Key = key
+		ok := ck.servers[i].Call("RaftKV.Get", args, reply)
 		if !ok {
 			if len(ck.servers) == 1 {
 				continue
@@ -69,10 +70,10 @@ func (ck *Clerk) Get(key string) string {
 			i = tmp
 		} else {
 			if reply.WrongLeader {
-				i = reply.LeaderId
+				i = ck.rdom.Int() % len(ck.servers)
 			} else {
 				if reply.Err != "" {
-					i = reply.LeaderId
+					i = ck.rdom.Int() % len(ck.servers)
 				} else {
 					ck.lastLeaderId = i
 					return reply.Value
@@ -94,11 +95,7 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	args := PutAppendArgs{}
-	reply := PutAppendReply{}
-	args.Key = key
-	args.Value = value
-	args.Op = op
+
 	var i int
 	if ck.lastLeaderId < 0 {
 		i = ck.rdom.Int() % len(ck.servers)
@@ -107,7 +104,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 
 	for {
-		ok := ck.servers[i].Call("RaftKV.PutAppend", &args, &reply)
+		args := &PutAppendArgs{}
+		reply := &PutAppendReply{}
+		args.Key = key
+		args.Value = value
+		args.Op = op
+		ok := ck.servers[i].Call("RaftKV.PutAppend", args, reply)
 		if !ok {
 			if len(ck.servers) == 1 {
 				continue
@@ -119,10 +121,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			i = tmp
 		} else {
 			if reply.WrongLeader {
-				i = reply.LeaderId
+				i = ck.rdom.Int() % len(ck.servers)
 			} else {
 				if reply.Err != "" {
-					i = reply.LeaderId
+					i = ck.rdom.Int() % len(ck.servers)
 				} else {
 					ck.lastLeaderId = i
 					return

@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -36,7 +36,7 @@ type RaftKV struct {
 
 	// Your definitions here.
 	kvBase  map[string]string
-	chanMap map[Op]chan Dispather
+	chanMap map[int]chan Dispather
 
 	curIndex int
 	curTerm  int
@@ -51,17 +51,27 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
+	kv.mu.Lock()
+	if c, ok := kv.chanMap[oldIndex]; ok {
+		c <- Dispather{success: false}
+	}
+	kv.chanMap[oldIndex] = make(chan Dispather)
+	c := kv.chanMap[oldIndex]
+	kv.mu.Unlock()
+	d := <-c
+	kv.mu.Lock()
+	delete(kv.chanMap, oldIndex)
+	kv.mu.Unlock()
+	reply.Value = d.value
 	reply.WrongLeader = false
 	reply.LeaderId = kv.me
-	kv.mu.Lock()
-	kv.chanMap[op] = make(chan Dispather)
-	kv.mu.Unlock()
-	d := <-kv.chanMap[op]
-	delete(kv.chanMap, op)
-	reply.Value = d.value
-	if d.index != oldIndex || d.term != oldTerm {
+	reply.Err = ""
+	// TODO
+	//  NEED TO BE IMPROVED
+	if d.success == false || d.term != oldTerm || d.key != args.Key {
 		reply.Err = "out-of-dated leader"
 	}
+	return
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -73,18 +83,27 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
+	kv.mu.Lock()
+	if c, ok := kv.chanMap[oldIndex]; ok {
+		c <- Dispather{success: false}
+	}
+	kv.chanMap[oldIndex] = make(chan Dispather)
+	c := kv.chanMap[oldIndex]
+	kv.mu.Unlock()
+	d := <-c
+	kv.mu.Lock()
+	delete(kv.chanMap, oldIndex)
+	kv.mu.Unlock()
+	// TODO
+	//  NEED TO BE IMPROVED
 	reply.WrongLeader = false
 	reply.LeaderId = kv.me
-	kv.mu.Lock()
-	kv.chanMap[op] = make(chan Dispather)
-	kv.mu.Unlock()
-	d := <-kv.chanMap[op]
-	kv.mu.Lock()
-	delete(kv.chanMap, op)
-	kv.mu.Unlock()
-	if d.index != oldIndex || d.term != oldTerm {
+	reply.Err = ""
+	if d.success == false || d.term != oldTerm || d.key != args.Key || d.value != args.Value {
 		reply.Err = "out-of-dated leader"
 	}
+
+	return
 }
 
 //
@@ -99,10 +118,11 @@ func (kv *RaftKV) Kill() {
 }
 
 type Dispather struct {
-	key   string
-	value string
-	index int
-	term  int
+	key     string
+	value   string
+	index   int
+	term    int
+	success bool
 }
 
 //
@@ -126,13 +146,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(RaftKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	kv.mu = sync.Mutex{}
 
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.kvBase = make(map[string]string, 100)
-	kv.chanMap = make(map[Op]chan Dispather)
+	kv.chanMap = make(map[int]chan Dispather)
 
 	// You may need initialization code here.
 	go func() {
@@ -143,21 +164,33 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			d.key = op.Key
 			d.value = op.Value
 			d.term = v.Term
+			d.success = true
 
 			switch op.Op {
 			case "Get":
+				kv.mu.Lock()
 				value, ok := kv.kvBase[op.Key]
 				if ok {
 					d.value = value
 				}
+				kv.mu.Unlock()
 			case "Put":
+				kv.mu.Lock()
 				kv.kvBase[op.Key] = op.Value
+				kv.mu.Unlock()
 			case "Append":
+				kv.mu.Lock()
 				kv.kvBase[op.Key] += op.Value
+				kv.mu.Unlock()
 			}
 
 			go func() {
-				kv.chanMap[op] <- d
+				kv.mu.Lock()
+				c, ok := kv.chanMap[d.index]
+				kv.mu.Unlock()
+				if ok {
+					c <- d
+				}
 			}()
 		}
 	}()
