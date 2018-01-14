@@ -9,6 +9,7 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
+	Id    string
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
@@ -24,6 +25,7 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
+	Id  string
 	Key string
 	// You'll have to add definitions here.
 }

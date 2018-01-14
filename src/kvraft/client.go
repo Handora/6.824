@@ -5,12 +5,17 @@ import "crypto/rand"
 import "math/big"
 import crand "math/rand"
 import "time"
+import "strconv"
+
+var clientNumberIterator = 0
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	rdom         *crand.Rand
 	lastLeaderId int
+	id           int
+	finished     int
 }
 
 func nrand() int64 {
@@ -26,6 +31,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	s := crand.NewSource(time.Now().UnixNano())
 	ck.rdom = crand.New(s)
 	ck.lastLeaderId = -1
+	ck.id = clientNumberIterator
+	clientNumberIterator++
+	ck.finished = 0
 
 	// You'll have to add code here.
 	return ck
@@ -58,6 +66,7 @@ func (ck *Clerk) Get(key string) string {
 		args := &GetArgs{}
 		reply := &GetReply{}
 		args.Key = key
+		args.Id = strconv.Itoa(ck.id) + ", " + strconv.Itoa(ck.finished)
 		ok := ck.servers[i].Call("RaftKV.Get", args, reply)
 		if !ok {
 			if len(ck.servers) == 1 {
@@ -76,6 +85,7 @@ func (ck *Clerk) Get(key string) string {
 					i = ck.rdom.Int() % len(ck.servers)
 				} else {
 					ck.lastLeaderId = i
+					ck.finished++
 					return reply.Value
 				}
 			}
@@ -109,6 +119,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		args.Key = key
 		args.Value = value
 		args.Op = op
+		args.Id = strconv.Itoa(ck.id) + ", " + strconv.Itoa(ck.finished)
 		ok := ck.servers[i].Call("RaftKV.PutAppend", args, reply)
 		if !ok {
 			if len(ck.servers) == 1 {
@@ -127,6 +138,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 					i = ck.rdom.Int() % len(ck.servers)
 				} else {
 					ck.lastLeaderId = i
+					ck.finished++
 					return
 				}
 			}

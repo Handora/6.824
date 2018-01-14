@@ -69,6 +69,7 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	applyCh   chan ApplyMsg
 	cond      *sync.Cond
+	random    *rand.Rand
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -467,7 +468,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.cond = sync.NewCond(&rf.mu)
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-	rand.Seed(time.Now().UnixNano() + int64(me))
+	s := rand.NewSource(time.Now().UnixNano() + int64(me)*100)
+	rf.random = rand.New(s)
 
 	// ensure the first index is 1
 	rf.Log = make([]LogEntry, 0, DefaultSliceLength)
@@ -484,12 +486,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				rf.cond.Wait()
 			}
 
-			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+			for {
+				i := rf.lastApplied + 1
+				if i > rf.commitIndex {
+					break
+				}
 				rf.lastApplied++
 				index := rf.lastApplied
 				command := rf.Log[rf.lastApplied].Command
 				app := ApplyMsg{Index: index, Command: command, Term: rf.Log[rf.lastApplied].Term}
+				rf.mu.Unlock()
 				rf.applyCh <- app
+				rf.mu.Lock()
 			}
 
 			rf.mu.Unlock()
@@ -506,8 +514,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			case FOLLOWER:
 				rf.doFollower()
 			case LEADER:
+				DPrintf(" %d gO THERE", rf.me)
 				rf.doLeader()
 			case CANDIDATE:
+				DPrintf(" %d In to there", rf.me)
 				rf.doCandidate()
 			}
 		}
@@ -522,7 +532,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) doFollower() {
 	rf.mu.Unlock()
 	select {
-	case <-time.After(time.Duration(rand.Intn(DefaultTermTop-DefaultTermBottom)+DefaultTermBottom) * time.Millisecond):
+	case <-time.After(time.Duration(rf.random.Intn(DefaultTermTop-DefaultTermBottom)+DefaultTermBottom) * time.Millisecond):
 		rf.mu.Lock()
 		rf.state = CANDIDATE
 		rf.mu.Unlock()
@@ -652,6 +662,10 @@ func (rf *Raft) doLeader() {
 										if rf.matchIndex[j] >= k {
 											sum++
 											if sum >= len(rf.peers)/2 {
+												for x := rf.commitIndex; x <= k; x++ {
+													DPrintf("Wow, It is %d\n", x)
+													DPrintf("It is %v", rf.Log[x])
+												}
 												rf.commitIndex = k
 												rf.cond.Signal()
 												rf.mu.Unlock()
@@ -735,7 +749,7 @@ func (rf *Raft) doCandidate() {
 	}
 
 	select {
-	case <-time.After(time.Duration(rand.Intn(DefaultTermTop-DefaultTermBottom)+DefaultTermBottom) * time.Millisecond):
+	case <-time.After(time.Duration(rf.random.Intn(DefaultTermTop-DefaultTermBottom)+DefaultTermBottom) * time.Millisecond):
 		return
 	case <-rf.sh:
 		return
