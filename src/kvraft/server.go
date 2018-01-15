@@ -6,9 +6,10 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -70,7 +71,14 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	c := kv.chanMap[oldIndex]
 	kv.mu.Unlock()
 	DPrintf("%d Get from %v with %d %d\n", kv.me, args.Id, oldIndex, oldTerm)
-	d := <-c
+	var d Dispather
+	select {
+		case <-time.After(500*time.Millisecond):
+			reply.WrongLeader = true
+			reply.Err = "Leadership change"
+			return
+		case d = <-c:
+	}
 	DPrintf("%d Get success %v %d %d\n", kv.me, args.Id, d.index, d.term)
 	kv.mu.Lock()
 	delete(kv.chanMap, oldIndex)
@@ -116,7 +124,14 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	c := kv.chanMap[oldIndex]
 	kv.mu.Unlock()
 	DPrintf("%d PutAppend from %v %d %d\n", kv.me, args.Id, oldIndex, oldTerm)
-	d := <-c
+	var d Dispather
+	select {
+	case <-time.After(500*time.Millisecond):
+		reply.WrongLeader = true
+		reply.Err = "Leadership change"
+		return
+	case d = <-c:
+	}
 	DPrintf("%d PutAppend success %v %d %d\n", kv.me, args.Id, d.index, d.term)
 	kv.mu.Lock()
 	delete(kv.chanMap, oldIndex)
@@ -238,8 +253,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 				c, ok := kv.chanMap[d.index]
 				kv.mu.Unlock()
 				if ok {
-					DPrintf("Heloo")
 					c <- d
+				} else {
+					if _, ok = kv.rf.GetState(); ok {
+						DPrintf("Hllo %v", d)
+					}
 				}
 			}()
 		}

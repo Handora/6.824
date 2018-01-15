@@ -662,10 +662,6 @@ func (rf *Raft) doLeader() {
 										if rf.matchIndex[j] >= k {
 											sum++
 											if sum >= len(rf.peers)/2 {
-												for x := rf.commitIndex; x <= k; x++ {
-													DPrintf("Wow, It is %d\n", x)
-													DPrintf("It is %v", rf.Log[x])
-												}
 												rf.commitIndex = k
 												rf.cond.Signal()
 												rf.mu.Unlock()
