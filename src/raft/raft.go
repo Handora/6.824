@@ -125,15 +125,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.Log)
 	data := w.Bytes()
-	go rf.persister.SaveRaftState(data)
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -198,7 +196,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer func() {
 		if needPersist {
-			go rf.persist()
+			rf.persist()
 		}
 		rf.mu.Unlock()
 	}()
@@ -294,7 +292,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer func() {
 		if needPersist {
-			go rf.persist()
+			rf.persist()
 		}
 		rf.mu.Unlock()
 	}()
@@ -424,7 +422,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	rf.Log = append(rf.Log, LogEntry{Term: rf.currentTerm, Command: command})
-	go rf.persist()
+	rf.persist()
 	return index, term, isLeader
 }
 
@@ -514,10 +512,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			case FOLLOWER:
 				rf.doFollower()
 			case LEADER:
-				DPrintf(" %d gO THERE", rf.me)
 				rf.doLeader()
 			case CANDIDATE:
-				DPrintf(" %d In to there", rf.me)
 				rf.doCandidate()
 			}
 		}
@@ -551,144 +547,141 @@ func (rf *Raft) doLeader() {
 	rf.mu.Unlock()
 
 	// send heartbeat or heartbeat to all peers
-	go func() {
-		for {
-			rf.mu.Lock()
-			// don't send out append if you are not leader again
-			if rf.state != LEADER {
-				rf.mu.Unlock()
-				break
+	for {
+		rf.mu.Lock()
+		// don't send out append if you are not leader again
+		if rf.state != LEADER {
+			rf.mu.Unlock()
+			break
+		}
+		for i := 0; i < len(rf.peers) && rf.state == LEADER; i++ {
+			rf.mu.Unlock()
+			if i == rf.me {
+				rf.mu.Lock()
+				continue
 			}
-			for i := 0; i < len(rf.peers) && rf.state == LEADER; i++ {
-				rf.mu.Unlock()
-				if i == rf.me {
+			i := i
+			go func() {
+				for {
 					rf.mu.Lock()
-					continue
-				}
-				i := i
-				go func() {
-					for {
-						rf.mu.Lock()
-						if rf.state != LEADER {
-							rf.mu.Unlock()
-							return
-						}
-						var entries []LogEntry
-						nextIndex := rf.nextIndex[i]
-						if nextIndex < len(rf.Log) {
-							entries = rf.Log[nextIndex:]
-						} else {
-							entries = make([]LogEntry, 0)
-						}
-						args := &AppendEntriesArgs{rf.currentTerm, rf.me, nextIndex - 1,
-							rf.Log[nextIndex-1].Term, entries, rf.commitIndex}
-						reply := &AppendEntriesReply{}
-
-						rf.mu.Unlock()
-						ok := rf.sendAppendEntries(i, args, reply)
-						rf.mu.Lock()
-
-						if rf.state != LEADER {
-							rf.mu.Unlock()
-							return
-						}
-
-						if ok {
-							if reply.Success == false {
-								if reply.Term > rf.currentTerm {
-									rf.currentTerm = reply.Term
-									rf.state = FOLLOWER
-									rf.sh <- 1
-									rf.votedFor = -1
-									go rf.persist()
-									rf.mu.Unlock()
-									return
-								} else if reply.Term < rf.currentTerm {
-									/*
-									  If a leader sends out an AppendEntries RPC, and it is rejected, but not because of log
-									  inconsistency (this can only happen if our term has passed), then you should immediately
-									  step down, and not update nextIndex. If you do, you could race with the resetting of nextIndex
-									  if you are re-elected immediately.
-
-									  from students-guide-to-raft
-									*/
-									rf.mu.Unlock()
-									return
-								} else {
-									var j int
-									for j = len(rf.Log) - 1; j >= 0; j-- {
-										if rf.Log[j].Term < reply.ConflictTerm {
-											rf.nextIndex[i] = reply.ConflictIndex
-											break
-										}
-										if reply.ConflictTerm == rf.Log[j].Term {
-											rf.nextIndex[i] = j + 1
-											break
-										}
-									}
-
-									if j < 0 {
-										rf.nextIndex[i] = reply.ConflictIndex
-									}
-								}
-							} else {
-								if reply.Term < rf.currentTerm {
-									rf.mu.Unlock()
-									return
-								}
-								if len(entries) == 0 {
-									rf.mu.Unlock()
-									return
-								}
-								if rf.nextIndex[i] < nextIndex+len(entries) {
-									rf.nextIndex[i] = nextIndex + len(entries)
-								}
-								rf.matchIndex[i] = nextIndex - 1 + len(entries)
-								/*
-									A leader is not allowed to update commitIndex to somewhere in
-									a previous term (or, for that matter, a future term). Thus,
-									as the rule says, you specifically need to check that
-									log[N].term == currentTerm. This is because Raft leaders cannot
-									be sure an entry is actually committed (and will not ever be
-									changed in the future) if it’s not from their current term.
-									This is illustrated by Figure 8 in the paper.
-
-									from students-guide-to-raft
-								*/
-								k := len(rf.Log) - 1
-								for rf.Log[k].Term == rf.currentTerm {
-									sum := 0
-									for j := 0; j < len(rf.peers); j++ {
-										if rf.matchIndex[j] >= k {
-											sum++
-											if sum >= len(rf.peers)/2 {
-												rf.commitIndex = k
-												rf.cond.Signal()
-												rf.mu.Unlock()
-												return
-											}
-										}
-									}
-									k--
-								}
-								rf.mu.Unlock()
-								return
-							}
-						}
+					if rf.state != LEADER {
 						rf.mu.Unlock()
 						return
 					}
-				}()
-				rf.mu.Lock()
-			}
-			rf.mu.Unlock()
-			time.Sleep(150 * time.Millisecond)
-		}
-	}()
+					var entries []LogEntry
+					nextIndex := rf.nextIndex[i]
+					if nextIndex < len(rf.Log) {
+						entries = rf.Log[nextIndex:]
+					} else {
+						entries = make([]LogEntry, 0)
+					}
+					args := &AppendEntriesArgs{rf.currentTerm, rf.me, nextIndex - 1,
+						rf.Log[nextIndex-1].Term, entries, rf.commitIndex}
+					reply := &AppendEntriesReply{}
 
-	select {
-	case <-rf.sh:
-		return
+					rf.mu.Unlock()
+					ok := rf.sendAppendEntries(i, args, reply)
+					rf.mu.Lock()
+
+					if rf.state != LEADER {
+						rf.mu.Unlock()
+						return
+					}
+
+					if ok {
+						if reply.Success == false {
+							if reply.Term > rf.currentTerm {
+								rf.currentTerm = reply.Term
+								rf.state = FOLLOWER
+								rf.sh <- 1
+								rf.votedFor = -1
+								rf.persist()
+								rf.mu.Unlock()
+								return
+							} else if reply.Term < rf.currentTerm {
+								/*
+								  If a leader sends out an AppendEntries RPC, and it is rejected, but not because of log
+								  inconsistency (this can only happen if our term has passed), then you should immediately
+								  step down, and not update nextIndex. If you do, you could race with the resetting of nextIndex
+								  if you are re-elected immediately.
+
+								  from students-guide-to-raft
+								*/
+								rf.mu.Unlock()
+								return
+							} else {
+								var j int
+								for j = len(rf.Log) - 1; j >= 0; j-- {
+									if rf.Log[j].Term < reply.ConflictTerm {
+										rf.nextIndex[i] = reply.ConflictIndex
+										break
+									}
+									if reply.ConflictTerm == rf.Log[j].Term {
+										rf.nextIndex[i] = j + 1
+										break
+									}
+								}
+
+								if j < 0 {
+									rf.nextIndex[i] = reply.ConflictIndex
+								}
+							}
+						} else {
+							if reply.Term < rf.currentTerm {
+								rf.mu.Unlock()
+								return
+							}
+							if len(entries) == 0 {
+								rf.mu.Unlock()
+								return
+							}
+							if rf.nextIndex[i] < nextIndex+len(entries) {
+								rf.nextIndex[i] = nextIndex + len(entries)
+							}
+							rf.matchIndex[i] = nextIndex - 1 + len(entries)
+							/*
+								A leader is not allowed to update commitIndex to somewhere in
+								a previous term (or, for that matter, a future term). Thus,
+								as the rule says, you specifically need to check that
+								log[N].term == currentTerm. This is because Raft leaders cannot
+								be sure an entry is actually committed (and will not ever be
+								changed in the future) if it’s not from their current term.
+								This is illustrated by Figure 8 in the paper.
+
+								from students-guide-to-raft
+							*/
+							k := len(rf.Log) - 1
+							for rf.Log[k].Term == rf.currentTerm {
+								sum := 0
+								for j := 0; j < len(rf.peers); j++ {
+									if rf.matchIndex[j] >= k {
+										sum++
+										if sum >= len(rf.peers)/2 {
+											rf.commitIndex = k
+											rf.cond.Signal()
+											rf.mu.Unlock()
+											return
+										}
+									}
+								}
+								k--
+							}
+							rf.mu.Unlock()
+							return
+						}
+					}
+					rf.mu.Unlock()
+					return
+				}
+			}()
+			rf.mu.Lock()
+		}
+		if rf.state != LEADER {
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -716,7 +709,7 @@ func (rf *Raft) doCandidate() {
 			needPersist := false
 			defer func() {
 				if needPersist {
-					go rf.persist()
+					rf.persist()
 				}
 				rf.mu.Unlock()
 			}()

@@ -64,32 +64,32 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	kv.mu.Lock()
-	if ch, ok := kv.chanMap[oldIndex]; ok {
-		ch <- Dispather{success: false}
+	if _, ok := kv.chanMap[oldIndex]; !ok {
+		kv.chanMap[oldIndex] = make(chan Dispather)
 	}
-	kv.chanMap[oldIndex] = make(chan Dispather)
+
 	c := kv.chanMap[oldIndex]
 	kv.mu.Unlock()
-	DPrintf("%d Get from %v with %d %d\n", kv.me, args.Id, oldIndex, oldTerm)
+
 	var d Dispather
 	select {
-		case <-time.After(500*time.Millisecond):
-			reply.WrongLeader = true
-			reply.Err = "Leadership change"
-			return
-		case d = <-c:
+	case <-time.After(500 * time.Millisecond):
+		reply.WrongLeader = true
+		reply.Err = "Leadership change"
+		return
+	case d = <-c:
 	}
-	DPrintf("%d Get success %v %d %d\n", kv.me, args.Id, d.index, d.term)
+
 	kv.mu.Lock()
 	delete(kv.chanMap, oldIndex)
 	kv.mu.Unlock()
-	reply.Value = d.value
 	reply.WrongLeader = false
+	reply.Value = d.value
 	reply.LeaderId = kv.me
 	reply.Err = ""
 	// TODO
 	//  NEED TO BE IMPROVED
-	if d.success == false || d.term != oldTerm || d.key != args.Key {
+	if d.term != oldTerm || d.key != args.Key {
 		reply.WrongLeader = true
 		reply.Err = "out-of-dated leader"
 		return
@@ -117,22 +117,22 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	kv.mu.Lock()
-	if ch, ok := kv.chanMap[oldIndex]; ok {
-		ch <- Dispather{success: false}
+	if _, ok := kv.chanMap[oldIndex]; !ok {
+		kv.chanMap[oldIndex] = make(chan Dispather)
 	}
-	kv.chanMap[oldIndex] = make(chan Dispather)
+
 	c := kv.chanMap[oldIndex]
 	kv.mu.Unlock()
-	DPrintf("%d PutAppend from %v %d %d\n", kv.me, args.Id, oldIndex, oldTerm)
+
 	var d Dispather
 	select {
-	case <-time.After(500*time.Millisecond):
+	case <-time.After(500 * time.Millisecond):
 		reply.WrongLeader = true
 		reply.Err = "Leadership change"
 		return
 	case d = <-c:
 	}
-	DPrintf("%d PutAppend success %v %d %d\n", kv.me, args.Id, d.index, d.term)
+
 	kv.mu.Lock()
 	delete(kv.chanMap, oldIndex)
 	kv.mu.Unlock()
@@ -141,7 +141,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	reply.WrongLeader = false
 	reply.LeaderId = kv.me
 	reply.Err = ""
-	if d.success == false || d.term != oldTerm || d.key != args.Key || d.value != args.Value {
+	if d.term != oldTerm || d.key != args.Key || d.value != args.Value {
 		reply.WrongLeader = true
 		reply.Err = "out-of-dated leader"
 		return
@@ -162,11 +162,10 @@ func (kv *RaftKV) Kill() {
 }
 
 type Dispather struct {
-	key     string
-	value   string
-	index   int
-	term    int
-	success bool
+	key   string
+	value string
+	index int
+	term  int
 }
 
 //
@@ -209,7 +208,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			d.key = op.Key
 			d.value = op.Value
 			d.term = v.Term
-			d.success = true
 
 			kv.mu.Lock()
 			value, ok := kv.actionMap[op.Id]
@@ -254,10 +252,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 				kv.mu.Unlock()
 				if ok {
 					c <- d
-				} else {
-					if _, ok = kv.rf.GetState(); ok {
-						DPrintf("Hllo %v", d)
-					}
 				}
 			}()
 		}
