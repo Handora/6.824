@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-const Debug = 0
+const (
+	Debug          = 0
+	DefaultTimeout = 800
+)
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -50,6 +53,7 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
 	if v, ok := kv.actionMap[args.Id]; ok {
 		reply.WrongLeader = false
+		reply.Err = ""
 		reply.Value = v
 		kv.mu.Unlock()
 		return
@@ -64,23 +68,28 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	kv.mu.Lock()
-	if _, ok := kv.chanMap[oldIndex]; !ok {
-		kv.chanMap[oldIndex] = make(chan Dispather)
+	if ch, ok := kv.chanMap[oldIndex]; ok {
+		close(ch)
 	}
 
+	kv.chanMap[oldIndex] = make(chan Dispather)
 	c := kv.chanMap[oldIndex]
 	kv.mu.Unlock()
 
-	var d Dispather
+	var (
+		d Dispather
+	)
+
 	select {
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(DefaultTimeout * time.Millisecond):
 		reply.WrongLeader = true
 		reply.Err = "Leadership change"
 		return
-	case d = <-c:
+	case d, ok = <-c:
 	}
 
 	kv.mu.Lock()
+	close(c)
 	delete(kv.chanMap, oldIndex)
 	kv.mu.Unlock()
 	reply.WrongLeader = false
@@ -89,7 +98,7 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	reply.Err = ""
 	// TODO
 	//  NEED TO BE IMPROVED
-	if d.term != oldTerm || d.key != args.Key {
+	if !ok || d.term != oldTerm || d.key != args.Key {
 		reply.WrongLeader = true
 		reply.Err = "out-of-dated leader"
 		return
@@ -117,23 +126,28 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	kv.mu.Lock()
-	if _, ok := kv.chanMap[oldIndex]; !ok {
-		kv.chanMap[oldIndex] = make(chan Dispather)
+	if ch, ok := kv.chanMap[oldIndex]; ok {
+		close(ch)
 	}
 
+	kv.chanMap[oldIndex] = make(chan Dispather)
 	c := kv.chanMap[oldIndex]
 	kv.mu.Unlock()
 
-	var d Dispather
+	var (
+		d Dispather
+	)
+
 	select {
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(DefaultTimeout * time.Millisecond):
 		reply.WrongLeader = true
 		reply.Err = "Leadership change"
 		return
-	case d = <-c:
+	case d, ok = <-c:
 	}
 
 	kv.mu.Lock()
+	close(c)
 	delete(kv.chanMap, oldIndex)
 	kv.mu.Unlock()
 	// TODO
@@ -141,7 +155,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	reply.WrongLeader = false
 	reply.LeaderId = kv.me
 	reply.Err = ""
-	if d.term != oldTerm || d.key != args.Key || d.value != args.Value {
+	if !ok || d.term != oldTerm || d.key != args.Key || d.value != args.Value {
 		reply.WrongLeader = true
 		reply.Err = "out-of-dated leader"
 		return

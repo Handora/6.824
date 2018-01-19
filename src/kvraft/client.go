@@ -69,20 +69,13 @@ func (ck *Clerk) Get(key string) string {
 		args.Id = strconv.Itoa(ck.id) + ", " + strconv.Itoa(ck.finished)
 		ok := ck.servers[i].Call("RaftKV.Get", args, reply)
 		if !ok {
-			if len(ck.servers) == 1 {
-				continue
-			}
-			tmp := ck.rdom.Int() % len(ck.servers)
-			for i == tmp {
-				tmp = ck.rdom.Int() % len(ck.servers)
-			}
-			i = tmp
+			i = (i + 1) % len(ck.servers)
 		} else {
 			if reply.WrongLeader {
-				i = ck.rdom.Int() % len(ck.servers)
+				i = (i + 1) % len(ck.servers)
 			} else {
 				if reply.Err != "" {
-					i = ck.rdom.Int() % len(ck.servers)
+					i = (i + 1) % len(ck.servers)
 				} else {
 					ck.lastLeaderId = i
 					ck.finished++
@@ -105,7 +98,6 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-
 	var i int
 	if ck.lastLeaderId < 0 {
 		i = ck.rdom.Int() % len(ck.servers)
@@ -122,20 +114,13 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		args.Id = strconv.Itoa(ck.id) + ", " + strconv.Itoa(ck.finished)
 		ok := ck.servers[i].Call("RaftKV.PutAppend", args, reply)
 		if !ok {
-			if len(ck.servers) == 1 {
-				continue
-			}
-			tmp := ck.rdom.Int() % len(ck.servers)
-			for i == tmp {
-				tmp = ck.rdom.Int() % len(ck.servers)
-			}
-			i = tmp
+			i = (i + 1) % len(ck.servers)
 		} else {
 			if reply.WrongLeader {
-				i = ck.rdom.Int() % len(ck.servers)
+				i = (i + 1) % len(ck.servers)
 			} else {
 				if reply.Err != "" {
-					i = ck.rdom.Int() % len(ck.servers)
+					i = (i + 1) % len(ck.servers)
 				} else {
 					ck.lastLeaderId = i
 					ck.finished++
