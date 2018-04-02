@@ -14,6 +14,7 @@ package raft
 // ApplyMsg
 //   each time a new entry is committed to the log, each Raft peer
 //   should send an ApplyMsg to the service (or tester)
+
 //   in the same server.
 //
 
@@ -46,8 +47,8 @@ const (
 type ApplyMsg struct {
 	Index       int
 	Command     interface{}
-	UseSnapshot bool   // ignore for lab2; only used in lab3
-	Snapshot    []byte // ignore for lab2; only used in lab3
+	UseSnapshot bool
+	Snapshot    []byte
 	Term        int
 }
 
@@ -55,6 +56,7 @@ type ApplyMsg struct {
 // A log entry implementation
 //
 type LogEntry struct {
+	Index   int
 	Term    int
 	Command interface{}
 }
@@ -71,7 +73,6 @@ type Raft struct {
 	cond      *sync.Cond
 	random    *rand.Rand
 
-	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	currentTerm int
@@ -117,14 +118,6 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
@@ -138,12 +131,6 @@ func (rf *Raft) persist() {
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	// d.Decode(&rf.xxx)
-	// d.Decode(&rf.yyy)
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
@@ -317,8 +304,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// return false if log doesn't matches PrevLogTerm and PrevLogIndex
-	if len(rf.Log) <= args.PrevLogIndex {
-		reply.ConflictIndex = len(rf.Log)
+	if len(rf.Log) == 1 || rf.Log[len(rf.Log)-1].Index < args.PrevLogIndex {
+		if len(rf.Log) == 1 {
+			reply.ConflictIndex = 1
+		} else {
+			reply.ConflictIndex = rf.Log[len(rf.Log)-1].Index
+		}
 		reply.ConflictTerm = -1
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -326,8 +317,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	if rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.ConflictTerm = rf.Log[args.PrevLogIndex].Term
+	var baseIndex int
+	if len(rf.Log) > 1 {
+		baseIndex = rf.Log[1].Index
+	} else {
+		baseIndex = 1
+	}
+	if rf.Log[args.PrevLogIndex-baseIndex+1].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.Log[args.PrevLogIndex-baseIndex+1].Term
 		for i := args.PrevLogIndex - 1; i >= 0; i-- {
 			if rf.Log[i].Term != reply.ConflictTerm {
 				reply.ConflictIndex = i + 1
@@ -335,7 +332,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 
-		rf.Log = rf.Log[:args.PrevLogIndex]
+		rf.Log = rf.Log[:args.PrevLogIndex-baseIndex+1]
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		needPersist = true
@@ -353,12 +350,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// according to student's advice
 	var i int
 	for i = 0; i < len(args.Entries); i++ {
-		if args.PrevLogIndex+i+1 >= len(rf.Log) || rf.Log[args.PrevLogIndex+i+1].Term != args.Entries[i].Term {
+		if args.PrevLogIndex-baseIndex+i+2 >= len(rf.Log) || rf.Log[args.PrevLogIndex-baseIndex+i+2].Term != args.Entries[i].Term {
 			break
 		}
 	}
-	if args.PrevLogIndex+i+1 < len(rf.Log) {
-		rf.Log = rf.Log[:args.PrevLogIndex+i+1]
+
+	if args.PrevLogIndex-baseIndex+i+2 < len(rf.Log) {
+		rf.Log = rf.Log[:args.PrevLogIndex-baseIndex+i+2]
 		needPersist = true
 	}
 
@@ -413,7 +411,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	index := len(rf.Log)
+	index := rf.Log[len(rf.Log)-1].Index + 1
 	term := rf.currentTerm
 	isLeader := rf.state == LEADER
 
@@ -421,7 +419,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 
-	rf.Log = append(rf.Log, LogEntry{Term: rf.currentTerm, Command: command})
+	rf.Log = append(rf.Log, LogEntry{Index: index, Term: rf.currentTerm, Command: command})
 	rf.persist()
 	return index, term, isLeader
 }
@@ -434,6 +432,20 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+}
+
+//
+// Raft can be given a log index, discard the entries before that index,
+// and continue operating while storing only log entries after that
+// index
+//
+func (rf *Raft) StartSnapshot(snapshot []byte, index int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// prepend a 0 index
+	rf.Log = append([]LogEntry{rf.Log[0]}, rf.Log[index:]...)
+	rf.persister.SaveSnapshot(snapshot)
+	rf.persist()
 }
 
 //
@@ -455,7 +467,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.applyCh = applyCh
 
-	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 0
 	rf.mu = sync.Mutex{}
 	rf.votedFor = -1
@@ -471,10 +482,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// ensure the first index is 1
 	rf.Log = make([]LogEntry, 0, DefaultSliceLength)
-	rf.Log = append(rf.Log, LogEntry{Term: 0, Command: nil})
+	rf.Log = append(rf.Log, LogEntry{Index: 0, Term: 0, Command: nil})
 	rf.sh = make(chan int, 10)
-
-	// rf.readPersist(rf.persister.ReadRaftState())
 
 	// apply the command when commitIndex > lastA
 	go func() {
@@ -484,18 +493,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				rf.cond.Wait()
 			}
 
+			var baseIndex int
+			if len(rf.Log) > 1 {
+				baseIndex = rf.Log[1].Index
+			} else {
+				baseIndex = 1
+			}
 			for {
 				i := rf.lastApplied + 1
 				if i > rf.commitIndex {
 					break
 				}
 				rf.lastApplied++
-				index := rf.lastApplied
-				command := rf.Log[rf.lastApplied].Command
-				app := ApplyMsg{Index: index, Command: command, Term: rf.Log[rf.lastApplied].Term}
-				rf.mu.Unlock()
+				log := rf.Log[rf.lastApplied-baseIndex+1]
+				// assert(log.Index == rf.lastApplied)
+				app := ApplyMsg{Index: log.Index, Command: log.Command, Term: log.Term}
+				// TODO
+				//   how to make sure the applyCh is no-blocking
 				rf.applyCh <- app
-				rf.mu.Lock()
 			}
 
 			rf.mu.Unlock()
@@ -541,12 +556,12 @@ func (rf *Raft) doFollower() {
 // state: leader
 func (rf *Raft) doLeader() {
 	for i := 0; i < len(rf.peers); i++ {
-		rf.nextIndex[i] = len(rf.Log)
+		rf.nextIndex[i] = rf.Log[len(rf.Log)-1].Index + 1
 		rf.matchIndex[i] = 0
 	}
 	rf.mu.Unlock()
 
-	// send heartbeat or heartbeat to all peers
+	// send heartbeat or append to all peers
 	for {
 		rf.mu.Lock()
 		// don't send out append if you are not leader again
@@ -554,6 +569,7 @@ func (rf *Raft) doLeader() {
 			rf.mu.Unlock()
 			break
 		}
+
 		for i := 0; i < len(rf.peers) && rf.state == LEADER; i++ {
 			rf.mu.Unlock()
 			if i == rf.me {
@@ -569,14 +585,21 @@ func (rf *Raft) doLeader() {
 						return
 					}
 					var entries []LogEntry
+
+					var baseIndex int
+					if len(rf.Log) > 1 {
+						baseIndex = rf.Log[1].Index
+					} else {
+						baseIndex = 1
+					}
 					nextIndex := rf.nextIndex[i]
-					if nextIndex < len(rf.Log) {
-						entries = rf.Log[nextIndex:]
+					if nextIndex <= rf.Log[len(rf.Log)-1].Index {
+						entries = rf.Log[nextIndex-baseIndex+1:]
 					} else {
 						entries = make([]LogEntry, 0)
 					}
 					args := &AppendEntriesArgs{rf.currentTerm, rf.me, nextIndex - 1,
-						rf.Log[nextIndex-1].Term, entries, rf.commitIndex}
+						rf.Log[nextIndex-baseIndex].Term, entries, rf.commitIndex}
 					reply := &AppendEntriesReply{}
 
 					rf.mu.Unlock()
@@ -611,13 +634,20 @@ func (rf *Raft) doLeader() {
 								return
 							} else {
 								var j int
+
+								var baseIndex int
+								if len(rf.Log) > 1 {
+									baseIndex = rf.Log[1].Index
+								} else {
+									baseIndex = 1
+								}
 								for j = len(rf.Log) - 1; j >= 0; j-- {
 									if rf.Log[j].Term < reply.ConflictTerm {
 										rf.nextIndex[i] = reply.ConflictIndex
 										break
 									}
 									if reply.ConflictTerm == rf.Log[j].Term {
-										rf.nextIndex[i] = j + 1
+										rf.nextIndex[i] = j + baseIndex
 										break
 									}
 								}

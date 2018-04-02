@@ -35,7 +35,6 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	clientNumberIterator++
 	ck.finished = 0
 
-	// You'll have to add code here.
 	return ck
 }
 

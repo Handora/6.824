@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"bytes"
 	"encoding/gob"
 	"labrpc"
 	"log"
@@ -18,6 +19,7 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
 		log.Printf(format, a...)
 	}
+
 	return
 }
 
@@ -217,11 +219,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	go func() {
 		for v := range kv.applyCh {
 			op := (v.Command).(Op)
-			d := Dispather{}
-			d.index = v.Index
-			d.key = op.Key
-			d.value = op.Value
-			d.term = v.Term
+			dispather := Dispather{}
+			dispather.index = v.Index
+			dispather.key = op.Key
+			dispather.value = op.Value
+			dispather.term = v.Term
 
 			kv.mu.Lock()
 			value, ok := kv.actionMap[op.Id]
@@ -229,7 +231,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 			if ok {
 				kv.mu.Lock()
-				d.value = value
+				dispather.value = value
 				kv.mu.Unlock()
 			} else {
 				switch op.Op {
@@ -237,7 +239,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 					kv.mu.Lock()
 					value, ok := kv.kvBase[op.Key]
 					if ok {
-						d.value = value
+						dispather.value = value
 					}
 					kv.actionMap[op.Id] = value
 					kv.mu.Unlock()
@@ -260,12 +262,30 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 				}
 			}
 
+			if kv.maxraftstate != -1 && persister.RaftStateSize() >= kv.maxraftstate {
+				kv.mu.Lock()
+				w := new(bytes.Buffer)
+				e := gob.NewEncoder(w)
+				// preserved to support AppendEntries consistency check for
+				// the first log entry following the snapshot, since that
+				// entry needs a previous log index and term.
+				e.Encode(v.Index)
+				e.Encode(v.Term)
+				e.Encode(kv.kvBase)
+				// actionMap also needs to be snapshoted
+				e.Encode(kv.actionMap)
+				data := w.Bytes()
+				go kv.rf.StartSnapshot(data, v.Index)
+				kv.mu.Unlock()
+			}
+
 			go func() {
 				kv.mu.Lock()
-				c, ok := kv.chanMap[d.index]
+				ch, ok := kv.chanMap[dispather.index]
 				kv.mu.Unlock()
+
 				if ok {
-					c <- d
+					ch <- dispather
 				}
 			}()
 		}
